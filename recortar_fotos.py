@@ -18,12 +18,15 @@ Uso:
 """
 
 import argparse
+import ctypes
 import csv
 import datetime
 import functools
+import hashlib
 import io
 import json
 import math
+import multiprocessing
 import os
 import re
 import shutil
@@ -48,6 +51,7 @@ RELATORIO_CSV = PASTA / "recorte_fotos.csv"
 MANUAL_FILE = PASTA / "recorte_manual.json"
 PREVIA_CAPAS_DIR = PASTA / "previa_capas"
 PREVIEW_DIR = Path(tempfile.gettempdir()) / "recorte_preview"
+PASTA_PROXIES_ANALISE = PASTA / ".cache_proxies_capaz"
 
 # PSD e caminho da camada FOTO, iguais aos modelos de AUTOMAÇAO-PASTA.py
 PSD_POR_TAMANHO = {
@@ -134,8 +138,13 @@ CALIBRACAO_PADRAO = {
 
 TOLERANCIA_MOLDE_PX = 2
 LADO_DETECCAO = 640
+LADO_PROXY_LOCAL = 800
+QUALIDADE_PROXY_LOCAL = 72
 LADO_PREVIA_RAPIDA = 1400
 MAX_FOTOS_POR_ONDA_SUBPASTA = 24
+LIMITE_CPU_PCT_PADRAO = 60
+USAR_GPU_OPENCL_PADRAO = True
+USAR_COPIA_LEVE_LOCAL_PADRAO = True
 
 
 # ============================================================
@@ -161,6 +170,9 @@ def carregar_config():
         "photos_link": (dados.get("photos_link") or "") if dados.get("fotos_origem") == "drive" else "",
         "moldes": moldes,
         "ampliacao_maxima": float(dados.get("recorte_ampliacao_maxima", 1.2)),
+        "hardware_limite_cpu_pct": int(dados.get("hardware_limite_cpu_pct", LIMITE_CPU_PCT_PADRAO)),
+        "hardware_usar_gpu_opencl": bool(dados.get("hardware_usar_gpu_opencl", USAR_GPU_OPENCL_PADRAO)),
+        "usar_copia_leve_local": bool(dados.get("usar_copia_leve_local", USAR_COPIA_LEVE_LOCAL_PADRAO)),
     }
 
 
@@ -517,14 +529,72 @@ def _salvar_cache_analise_subpastas():
             pass
 
 
-def verificar_cache_analise_subpastas(pasta_fotos=None):
+def calcular_recursos_hardware(limite_cpu_pct=None, usar_gpu_opencl=None, total_tarefas=None):
+    """
+    Calcula o orçamento seguro de hardware (CPU + GPU OpenCL + Prioridade Baixa do SO)
+    para acelerar a seleção das fotos usando o hardware da máquina sem usar 100% da CPU
+    e sem travar o computador.
+    """
+    bruto = {}
+    try:
+        bruto = ler_config_bruto()
+    except Exception:
+        bruto = {}
+
+    if limite_cpu_pct is None:
+        limite_cpu_pct = bruto.get("hardware_limite_cpu_pct", LIMITE_CPU_PCT_PADRAO)
+    try:
+        pct = max(20, min(90, int(round(float(limite_cpu_pct)))))
+    except Exception:
+        pct = LIMITE_CPU_PCT_PADRAO
+
+    if usar_gpu_opencl is None:
+        usar_gpu_opencl = bruto.get("hardware_usar_gpu_opencl", USAR_GPU_OPENCL_PADRAO)
+    usar_gpu = bool(usar_gpu_opencl)
+
+    nucleos_totais = max(1, os.cpu_count() or 4)
+    # Garante pelo menos 1 núcleo livre em máquinas multi-core para o sistema não engasgar
+    max_permitido = max(1, nucleos_totais - 1) if nucleos_totais > 1 else 1
+    nucleos_calculados = max(1, int(round(nucleos_totais * (pct / 100.0))))
+    nucleos_usados = min(max_permitido, nucleos_calculados)
+    if total_tarefas is not None and total_tarefas > 0:
+        nucleos_usados = max(1, min(nucleos_usados, int(total_tarefas)))
+    nucleos_livres = max(0, nucleos_totais - nucleos_usados)
+
+    gpu_disp = False
+    try:
+        gpu_disp = bool(hasattr(cv2, "ocl") and cv2.ocl.haveOpenCL())
+    except Exception:
+        gpu_disp = False
+
+    return {
+        "nucleos_totais": nucleos_totais,
+        "nucleos_usados": nucleos_usados,
+        "nucleos_livres": nucleos_livres,
+        "limite_cpu_pct": pct,
+        "usar_gpu_opencl": usar_gpu,
+        "gpu_disponivel": gpu_disp,
+        "gpu_ativa": bool(usar_gpu and gpu_disp),
+        "prioridade": "BELOW_NORMAL",
+    }
+
+
+def verificar_cache_analise_subpastas(
+    pasta_fotos=None,
+    processar_pendentes_pool=False,
+    limite_cpu_pct=None,
+    usar_gpu_opencl=None,
+):
     """
     Verifica e pré-carrega `cache_analise_subpastas.json` ao iniciar o programa ou carregar fotos.
     Sincroniza todos os rostos já analisados (nas subpastas e nos arquivos copiados para FOTO)
     para a memória, evitando reprocessar fotos já analisadas e garantindo carregamento instantâneo.
+    Se `processar_pendentes_pool=True` e houver fotos ainda fora do cache na pasta `pasta_fotos`,
+    distribui a análise entre os núcleos permitidos pelo limite de hardware via `multiprocessing.Pool`.
     """
     cache_an = _carregar_cache_analise_subpastas()
     cache_r = _carregar_cache_rostos()
+    hw = calcular_recursos_hardware(limite_cpu_pct=limite_cpu_pct, usar_gpu_opencl=usar_gpu_opencl)
 
     fotos_em_cache = 0
     with _cache_rostos_lock:
@@ -552,6 +622,7 @@ def verificar_cache_analise_subpastas(pasta_fotos=None):
 
     fotos_atuais_em_cache = 0
     total_fotos_pasta = 0
+    pendentes_pasta = []
     if pasta_fotos is not None:
         try:
             p = Path(pasta_fotos)
@@ -569,10 +640,43 @@ def verificar_cache_analise_subpastas(pasta_fotos=None):
                             ch_r = f"{norm_p}|{st.st_mtime_ns}|{st.st_size}"
                             if ch_r in cache_r or f"{ch_r}|v2" in cache_an:
                                 fotos_atuais_em_cache += 1
+                            elif processar_pendentes_pool:
+                                pendentes_pasta.append((str(entry.path), st.st_mtime_ns, st.st_size, False))
                         except Exception:
                             pass
         except Exception:
             pass
+
+    if processar_pendentes_pool and len(pendentes_pasta) >= 2:
+        try:
+            if not MODELO_YUNET.is_file():
+                urllib.request.urlretrieve(URL_YUNET, MODELO_YUNET)
+            num_nucleos = min(len(pendentes_pasta), hw["nucleos_usados"])
+            with multiprocessing.Pool(
+                processes=num_nucleos,
+                initializer=_init_worker_pool_subpastas,
+                initargs=(hw["usar_gpu_opencl"],),
+            ) as pool:
+                for ch_an, ch_r, m_base in pool.imap_unordered(_extrair_metricas_foto_worker, pendentes_pasta, chunksize=2):
+                    if m_base is not None:
+                        with _cache_rostos_lock:
+                            cache_an[ch_an] = m_base
+                            rostos_l = m_base.get("rostos") or []
+                            cache_r[ch_r] = rostos_l[0] if rostos_l else None
+                        fotos_atuais_em_cache += 1
+                        fotos_em_cache += 1
+            _salvar_cache_analise_subpastas()
+            _salvar_cache_rostos()
+        except Exception:
+            pass
+
+    proxies_count = 0
+    try:
+        if PASTA_PROXIES_ANALISE.is_dir():
+            for root_d, _, files_d in os.walk(PASTA_PROXIES_ANALISE):
+                proxies_count += sum(1 for f in files_d if f.endswith(".jpg"))
+    except Exception:
+        proxies_count = 0
 
     return {
         "arquivo": str(CACHE_ANALISE_SUBPASTAS_FILE),
@@ -581,6 +685,12 @@ def verificar_cache_analise_subpastas(pasta_fotos=None):
         "subpastas_em_cache": subpastas_em_cache,
         "fotos_pasta_atual_em_cache": fotos_atuais_em_cache,
         "total_fotos_pasta": total_fotos_pasta,
+        "nucleos_cpu": hw["nucleos_totais"],
+        "nucleos_usados": hw["nucleos_usados"],
+        "nucleos_livres": hw["nucleos_livres"],
+        "limite_cpu_pct": hw["limite_cpu_pct"],
+        "gpu_ativa": hw["gpu_ativa"],
+        "proxies_locais": proxies_count,
     }
 
 
@@ -806,6 +916,65 @@ def _decodificar_bgr_para_analise(caminho, lado_max=LADO_DETECCAO):
     return bgr, (W_orig, H_orig)
 
 
+def _garantir_copia_leve_local(
+    caminho,
+    mtime_ns=None,
+    fsize=None,
+    lado_proxy=LADO_PROXY_LOCAL,
+    qualidade=QUALIDADE_PROXY_LOCAL,
+):
+    """
+    Cria ou reutiliza uma cópia leve local (proxy JPEG com diminuição de qualidade e resolução, ~45 KB)
+    em `.cache_proxies_capaz` no disco rápido da máquina do usuário, preservando no nome do arquivo
+    as dimensões reais `(W_orig, H_orig)` da foto original no Google Drive / rede / HD externo.
+    Retorna `(bgr_reduzido, (W_orig, H_orig), caminho_proxy_str, criado_agora)`.
+    """
+    caminho_p = Path(caminho)
+    if mtime_ns is None or fsize is None:
+        st = caminho_p.stat()
+        mtime_ns, fsize = st.st_mtime_ns, st.st_size
+
+    norm_p = _norm_caminho_rapido(caminho_p)
+    norm_parent = _norm_caminho_rapido(caminho_p.parent)
+    sub_hash = hashlib.md5(norm_parent.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    arq_hash = hashlib.md5(f"{norm_p}|{mtime_ns}|{fsize}".encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+    pasta_sub_proxy = PASTA_PROXIES_ANALISE / sub_hash
+    # Verifica se já existe proxy salvo com dimensões codificadas no nome (<arq_hash>_<W>x<H>.jpg)
+    if pasta_sub_proxy.is_dir():
+        try:
+            with os.scandir(pasta_sub_proxy) as it:
+                for entry in it:
+                    if entry.is_file() and entry.name.startswith(arq_hash + "_") and entry.name.endswith(".jpg"):
+                        dims_txt = entry.name[len(arq_hash) + 1 : -4]
+                        if "x" in dims_txt:
+                            w_s, h_s = dims_txt.split("x", 1)
+                            W_orig, H_orig = int(w_s), int(h_s)
+                            buf_p = np.fromfile(entry.path, dtype=np.uint8)
+                            bgr_p = cv2.imdecode(buf_p, cv2.IMREAD_COLOR)
+                            if bgr_p is not None and bgr_p.size > 0:
+                                return bgr_p, (W_orig, H_orig), entry.path, False
+        except Exception:
+            pass
+
+    # Decodifica a foto de origem usando fast DCT 1/8 (lê e descomprime em baixa resolução)
+    bgr_red, (W_orig, H_orig) = _decodificar_bgr_para_analise(caminho_p, lado_max=lado_proxy)
+    caminho_proxy = pasta_sub_proxy / f"{arq_hash}_{W_orig}x{H_orig}.jpg"
+    try:
+        pasta_sub_proxy.mkdir(parents=True, exist_ok=True)
+        ok_enc, buf_jpg = cv2.imencode(
+            ".jpg",
+            bgr_red,
+            [int(cv2.IMWRITE_JPEG_QUALITY), int(qualidade)],
+        )
+        if ok_enc:
+            caminho_proxy.write_bytes(buf_jpg.tobytes())
+    except Exception:
+        pass
+
+    return bgr_red, (W_orig, H_orig), str(caminho_proxy), True
+
+
 def abrir_foto_para_analise(caminho, lado_max=LADO_DETECCAO):
     """
     Compatibilidade: retorna (PIL.Image RGB reduzida, (W_orig, H_orig)) usando o decodificador C++ rápido.
@@ -1003,11 +1172,13 @@ def _analisar_histograma_e_contraste(arr_rosto):
     }
 
 
-def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None):
+def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None, usar_copia_leve=True):
     """
     Extrai uma única vez por foto (com cache persistente em disco e pipeline 100% C++ OpenCV/NumPy)
     as métricas independentes de molde: dimensões originais, rostos detectados, nitidez Laplaciano,
     simetria frontal, histograma de altas luzes e pontuação de contraste (~6 ms por foto).
+    Quando `usar_copia_leve=True`, gera/usa primeiro uma cópia leve local (`.cache_proxies_capaz`)
+    com diminuição de qualidade no disco rápido do PC, mantendo a foto original só para a escolhida.
     """
     caminho_p = Path(caminho)
     chave_cache = None
@@ -1025,7 +1196,13 @@ def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None):
     except Exception:
         pass
 
-    bgr_red, (W, H) = _decodificar_bgr_para_analise(caminho_p, LADO_DETECCAO)
+    caminho_proxy_str = ""
+    if usar_copia_leve:
+        bgr_red, (W, H), caminho_proxy_str, _ = _garantir_copia_leve_local(
+            caminho_p, mtime_ns=mtime_ns, fsize=fsize
+        )
+    else:
+        bgr_red, (W, H) = _decodificar_bgr_para_analise(caminho_p, LADO_DETECCAO)
     rostos = detectar_rostos_bgr(bgr_red, tamanho_original=(W, H), usar_haar_fallback=False)
 
     # Aproveita para alimentar também o cache de rosto da aba Revisão
@@ -1045,6 +1222,7 @@ def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None):
             "pts_frente": 0.0,
             "rosto_de_frente": False,
             "hist_luz": _analisar_histograma_e_contraste(None),
+            "proxy_local": caminho_proxy_str,
         }
         if chave_cache is not None:
             cache_an = _carregar_cache_analise_subpastas()
@@ -1104,6 +1282,7 @@ def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None):
         "pts_frente": pts_frente,
         "rosto_de_frente": rosto_de_frente,
         "hist_luz": hist_luz,
+        "proxy_local": caminho_proxy_str,
     }
     if chave_cache is not None:
         cache_an = _carregar_cache_analise_subpastas()
@@ -1488,6 +1667,354 @@ def _ja_tem_candidatas_excelentes(metricas_por_arquivo, tamanhos_necessarios, cf
     return True
 
 
+def _init_worker_pool_subpastas(usar_gpu_opencl=True):
+    """
+    Inicializador de cada processo do `multiprocessing.Pool`:
+      1. Reduz a prioridade do processo filho no sistema operacional (`BELOW_NORMAL_PRIORITY_CLASS` no Windows
+         ou `os.nice(10)` no Linux/macOS) para nunca engasgar o mouse, navegador ou Photoshop.
+      2. Ativa aceleração de hardware por placa de vídeo via OpenCL (`cv2.ocl.setUseOpenCL`) quando disponível.
+      3. Limita threads internas do OpenCV (`cv2.setNumThreads(1)`) para respeitar o limite de núcleos escolhido.
+      4. Carrega `cache_analise_subpastas.json` e `cache_rostos_yunet.json` em memória e inicializa YuNet ONNX.
+    """
+    try:
+        if sys.platform == "win32":
+            # BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.kernel32.SetPriorityClass(handle, 0x00004000)
+        elif hasattr(os, "nice"):
+            os.nice(10)
+    except Exception:
+        pass
+    try:
+        cv2.setNumThreads(1)
+    except Exception:
+        pass
+    try:
+        if hasattr(cv2, "ocl"):
+            cv2.ocl.setUseOpenCL(bool(usar_gpu_opencl and cv2.ocl.haveOpenCL()))
+    except Exception:
+        pass
+    try:
+        _carregar_cache_analise_subpastas()
+        _carregar_cache_rostos()
+        if MODELO_YUNET.is_file():
+            detector_yunet()
+    except Exception:
+        pass
+
+
+def _extrair_metricas_foto_worker(item):
+    """
+    Worker top-level para `multiprocessing.Pool`: extrai as métricas base de uma única foto
+    (`(caminho_str, mtime_ns, fsize, usar_copia_leve)`) em um processo de CPU dedicado.
+    """
+    if len(item) >= 4:
+        cam_str, mtime_ns, fsize, usar_copia_leve = item[:4]
+    else:
+        cam_str, mtime_ns, fsize = item[:3]
+        usar_copia_leve = True
+    norm_p = _norm_caminho_rapido(cam_str)
+    ch_r = f"{norm_p}|{mtime_ns}|{fsize}"
+    ch_an = f"{ch_r}|v2"
+    try:
+        m_base = _extrair_metricas_base_foto(cam_str, mtime_ns, fsize, usar_copia_leve=bool(usar_copia_leve))
+        return ch_an, ch_r, m_base
+    except Exception:
+        return ch_an, ch_r, None
+
+
+def _processar_subpasta_worker(tarefa):
+    """
+    Worker top-level executado em paralelo pelo `multiprocessing.Pool` (respeitando o limite de CPU/GPU):
+      1. Lista as imagens via `os.scandir` (`_listar_imagens_subpasta_com_stat`).
+      2. Verifica a assinatura no `cache_analise_subpastas.json` (0ms se inalterada).
+      3. Gera/usa cópia leve local (`.cache_proxies_capaz`) com diminuição de qualidade para analisar rápido
+         na máquina local em ondas de 24 fotos com poda inteligente (`_ja_tem_candidatas_excelentes`).
+      4. Avalia os moldes do plano, seleciona a campeã (ou menos pior com aviso) e copia a foto ORIGINAL
+         em resolução total da pasta de origem para a pasta FOTO.
+    """
+    idx_sub = tarefa["idx_sub"]
+    sub = Path(tarefa["sub_str"])
+    nome_aluno = tarefa["nome_aluno"]
+    ch_aluno = tarefa["ch_aluno"]
+    plano_aluno = tarefa["plano_aluno"]
+    curso_aluno = tarefa["curso_aluno"]
+    tamanhos_necessarios = tarefa["tamanhos_necessarios"]
+    cfg_serial = tarefa["cfg_serial"]
+    calib = tarefa["calib"]
+    usar_copia_leve = bool(tarefa.get("usar_copia_leve_local", True))
+
+    pasta_fotos = Path(cfg_serial["fotos"])
+    cfg_local = {
+        "fotos": pasta_fotos,
+        "moldes": {k: tuple(v) for k, v in cfg_serial["moldes"].items()},
+        "ampliacao_maxima": float(cfg_serial.get("ampliacao_maxima", 1.2)),
+    }
+
+    itens_sub = _listar_imagens_subpasta_com_stat(sub)
+    if not itens_sub:
+        return {
+            "idx_sub": idx_sub,
+            "nome_aluno": nome_aluno,
+            "total_itens_sub": 0,
+            "relatorio_item": {
+                "nome": nome_aluno,
+                "curso": curso_aluno,
+                "plano": plano_aluno,
+                "status": "SEM_FOTOS",
+                "avisos": ["Nenhuma foto encontrada na subpasta"],
+                "escolhidas": {},
+                "do_cache": False,
+                "fotos_em_cache": 0,
+                "fotos_analisadas_agora": 0,
+                "proxies_usados": 0,
+            },
+            "norm_sub": None,
+            "sub_cache_entry": None,
+            "opcoes_aluno": {},
+            "novas_metricas": {},
+            "novos_rostos": {},
+            "novos_destinos": {},
+            "destinos_apagar_manual": [],
+        }
+
+    cache_an = _carregar_cache_analise_subpastas()
+    subpastas_cache = cache_an.get("_subpastas") or {}
+    norm_sub = _norm_caminho_rapido(sub)
+    assinatura_atual = _assinatura_subpasta(itens_sub, tamanhos_necessarios, cfg_local, calib)
+    reg_sub_cache = subpastas_cache.get(norm_sub)
+
+    opcoes_aluno = {}
+    novas_metricas = {}
+    novos_rostos = {}
+    novos_destinos = {}
+    destinos_apagar_manual = []
+
+    # FAST PATH INSTANTÂNEO (0ms): Subpasta inalterada já está em cache_analise_subpastas.json
+    if (
+        isinstance(reg_sub_cache, dict)
+        and reg_sub_cache.get("assinatura") == assinatura_atual
+        and isinstance(reg_sub_cache.get("escolhidas"), dict)
+    ):
+        escolhidas_aluno = reg_sub_cache["escolhidas"]
+        avisos_aluno = list(reg_sub_cache.get("avisos") or [])
+        candidatas_por_tam = reg_sub_cache.get("candidatas_por_tam") or {}
+        rostos_campeas = reg_sub_cache.get("rostos_campeas") or {}
+
+        for tam, campea in escolhidas_aluno.items():
+            nome_dest = nome_arquivo_destino_foto(nome_aluno, tam)
+            destino = pasta_fotos / nome_dest
+            origem_campea = Path(campea["caminho"])
+            rosto_c = rostos_campeas.get(tam)
+            if origem_campea.is_file():
+                _copiar_foto_campea_rapido(origem_campea, destino, rosto_detectado=rosto_c)
+                try:
+                    st_o = origem_campea.stat()
+                    st_d = destino.stat()
+                    norm_o = _norm_caminho_rapido(origem_campea)
+                    norm_d = _norm_caminho_rapido(destino)
+                    ch_o = f"{norm_o}|{st_o.st_mtime_ns}|{st_o.st_size}"
+                    ch_d = f"{norm_d}|{st_d.st_mtime_ns}|{st_d.st_size}"
+                    novos_destinos[norm_d] = {"chave_orig": ch_o, "chave_dest": ch_d, "rosto": rosto_c}
+                    if rosto_c is not None:
+                        novos_rostos[ch_d] = rosto_c
+                except Exception:
+                    pass
+            chave_op = f"{ch_aluno}|{tam}"
+            opcoes_aluno[chave_op] = {
+                "nome": nome_aluno,
+                "tamanho": tam,
+                "arquivo_destino": str(destino),
+                "escolhida": campea["caminho"],
+                "aviso_revisao": campea.get("aviso_revisao", ""),
+                "candidatas": candidatas_por_tam.get(tam, [campea]),
+            }
+
+        return {
+            "idx_sub": idx_sub,
+            "nome_aluno": nome_aluno,
+            "total_itens_sub": len(itens_sub),
+            "relatorio_item": {
+                "nome": nome_aluno,
+                "curso": curso_aluno,
+                "plano": plano_aluno,
+                "status": "AVISO_QUALIDADE" if avisos_aluno else ("OK" if escolhidas_aluno else "ERRO"),
+                "avisos": avisos_aluno,
+                "escolhidas": escolhidas_aluno,
+                "do_cache": True,
+                "fotos_em_cache": len(itens_sub),
+                "fotos_analisadas_agora": 0,
+                "proxies_usados": 0,
+            },
+            "norm_sub": norm_sub,
+            "sub_cache_entry": reg_sub_cache,
+            "opcoes_aluno": opcoes_aluno,
+            "novas_metricas": novas_metricas,
+            "novos_rostos": novos_rostos,
+            "novos_destinos": novos_destinos,
+            "destinos_apagar_manual": destinos_apagar_manual,
+        }
+
+    # 1) Verifica foto a foto no cache carregado pelo processo worker
+    metricas_por_arquivo = {}
+    fotos_para_analisar = []
+    fotos_hit_cache = 0
+    for arq, mtime_ns, fsize in itens_sub:
+        norm_arq = _norm_caminho_rapido(arq)
+        ch_rosto = f"{norm_arq}|{mtime_ns}|{fsize}"
+        ch_an = f"{ch_rosto}|v2"
+        if ch_an in cache_an and isinstance(cache_an[ch_an], dict):
+            metricas_por_arquivo[str(arq)] = cache_an[ch_an]
+            fotos_hit_cache += 1
+        else:
+            fotos_para_analisar.append((arq, mtime_ns, fsize, ch_an, ch_rosto))
+
+    fotos_analisadas_sub = 0
+    proxies_usados_sub = 0
+    if fotos_para_analisar:
+        if len(fotos_para_analisar) > MAX_FOTOS_POR_ONDA_SUBPASTA:
+            fotos_para_analisar.sort(key=lambda item: item[2], reverse=True)
+
+        total_novas = len(fotos_para_analisar)
+        for inicio_onda in range(0, total_novas, MAX_FOTOS_POR_ONDA_SUBPASTA):
+            onda = fotos_para_analisar[inicio_onda:inicio_onda + MAX_FOTOS_POR_ONDA_SUBPASTA]
+            for arq, mtime_ns, fsize, ch_an, ch_rosto in onda:
+                try:
+                    m_base = _extrair_metricas_base_foto(
+                        arq, mtime_ns, fsize, usar_copia_leve=usar_copia_leve
+                    )
+                    metricas_por_arquivo[str(arq)] = m_base
+                    novas_metricas[ch_an] = m_base
+                    rostos_l = (m_base or {}).get("rostos") or []
+                    novos_rostos[ch_rosto] = rostos_l[0] if rostos_l else None
+                    fotos_analisadas_sub += 1
+                    if usar_copia_leve and (m_base or {}).get("proxy_local"):
+                        proxies_usados_sub += 1
+                except Exception:
+                    pass
+
+            if (
+                inicio_onda + MAX_FOTOS_POR_ONDA_SUBPASTA < total_novas
+                and _ja_tem_candidatas_excelentes(metricas_por_arquivo, tamanhos_necessarios, cfg_local, calib)
+            ):
+                break
+
+    # 2) Avalia cada tamanho exigido pelo plano do formando e copia a campeã ORIGINAL para FOTO
+    escolhidas_aluno = {}
+    avisos_aluno = []
+    candidatas_por_tam = {}
+    rostos_campeas = {}
+
+    for tam in tamanhos_necessarios:
+        molde = cfg_local["moldes"].get(tam, MOLDES_PADRAO.get(tam, (3874, 3012)))
+        calib_tam = calib.get(tam, CALIBRACAO_PADRAO)
+        amp_max = cfg_local["ampliacao_maxima"]
+
+        avaliacoes = []
+        for arq, _, _ in itens_sub:
+            m_base = metricas_por_arquivo.get(str(arq))
+            if m_base is None:
+                continue
+            try:
+                avaliacoes.append(
+                    avaliar_foto_para_molde(arq, tam, molde, calib_tam, amp_max, metricas_base=m_base)
+                )
+            except Exception:
+                pass
+
+        if not avaliacoes:
+            continue
+
+        avaliacoes.sort(
+            key=lambda a: (
+                1 if a.get("valida") else 0,
+                1 if a.get("qtd_pessoas") == 1 else (0 if a.get("qtd_pessoas", 0) > 1 else -1),
+                1 if a.get("aprovada_qualidade") else 0,
+                float(a.get("nota", 0.0)),
+                int(a.get("densidade_rosto_px", 0)),
+                int(a.get("encaixe_pct", 0)),
+            ),
+            reverse=True,
+        )
+
+        campea = dict(avaliacoes[0])
+        if not campea.get("aprovada_qualidade") and campea.get("aviso_qualidade"):
+            aviso_msg = f"Escolhida a menos pior p/ {tam} ({campea['aviso_qualidade']})"
+            campea["aviso_revisao"] = aviso_msg
+            avisos_aluno.append(aviso_msg)
+        else:
+            campea["aviso_revisao"] = ""
+
+        nome_dest = nome_arquivo_destino_foto(nome_aluno, tam)
+        destino = pasta_fotos / nome_dest
+        origem_campea = Path(campea["caminho"])
+        m_campea = metricas_por_arquivo.get(str(origem_campea)) or {}
+        rosto_campea = (m_campea.get("rostos") or [None])[0]
+        rostos_campeas[tam] = rosto_campea
+
+        # Copia apenas a foto CAMPEÃ em qualidade ORIGINAL para a pasta FOTO
+        _copiar_foto_campea_rapido(origem_campea, destino, rosto_detectado=rosto_campea)
+        destinos_apagar_manual.append(str(destino))
+        try:
+            st_o = origem_campea.stat()
+            st_d = destino.stat()
+            norm_o = _norm_caminho_rapido(origem_campea)
+            norm_d = _norm_caminho_rapido(destino)
+            ch_o = f"{norm_o}|{st_o.st_mtime_ns}|{st_o.st_size}"
+            ch_d = f"{norm_d}|{st_d.st_mtime_ns}|{st_d.st_size}"
+            novos_destinos[norm_d] = {"chave_orig": ch_o, "chave_dest": ch_d, "rosto": rosto_campea}
+            if rosto_campea is not None:
+                novos_rostos[ch_d] = rosto_c if "rosto_c" in locals() else rosto_campea
+        except Exception:
+            pass
+
+        top_candidatas = avaliacoes[:6]
+        candidatas_por_tam[tam] = top_candidatas
+        chave_op = f"{ch_aluno}|{tam}"
+        opcoes_aluno[chave_op] = {
+            "nome": nome_aluno,
+            "tamanho": tam,
+            "arquivo_destino": str(destino),
+            "escolhida": campea["caminho"],
+            "aviso_revisao": campea.get("aviso_revisao", ""),
+            "candidatas": top_candidatas,
+        }
+        escolhidas_aluno[tam] = campea
+
+    sub_cache_entry = {
+        "assinatura": assinatura_atual,
+        "escolhidas": escolhidas_aluno,
+        "avisos": avisos_aluno,
+        "candidatas_por_tam": candidatas_por_tam,
+        "rostos_campeas": rostos_campeas,
+    }
+
+    return {
+        "idx_sub": idx_sub,
+        "nome_aluno": nome_aluno,
+        "total_itens_sub": len(itens_sub),
+        "relatorio_item": {
+            "nome": nome_aluno,
+            "curso": curso_aluno,
+            "plano": plano_aluno,
+            "status": "AVISO_QUALIDADE" if avisos_aluno else ("OK" if escolhidas_aluno else "ERRO"),
+            "avisos": avisos_aluno,
+            "escolhidas": escolhidas_aluno,
+            "do_cache": fotos_analisadas_sub == 0,
+            "fotos_em_cache": fotos_hit_cache,
+            "fotos_analisadas_agora": fotos_analisadas_sub,
+            "proxies_usados": proxies_usados_sub,
+        },
+        "norm_sub": norm_sub,
+        "sub_cache_entry": sub_cache_entry,
+        "opcoes_aluno": opcoes_aluno,
+        "novas_metricas": novas_metricas,
+        "novos_rostos": novos_rostos,
+        "novos_destinos": novos_destinos,
+        "destinos_apagar_manual": destinos_apagar_manual,
+    }
+
+
 def escolher_melhores_fotos_subpastas(
     pasta_subpastas,
     cfg,
@@ -1497,15 +2024,17 @@ def escolher_melhores_fotos_subpastas(
     curso_padrao="",
     berlim_modo="Ambos",
     progresso_cb=None,
+    limite_cpu_pct=None,
+    usar_gpu_opencl=None,
+    usar_copia_leve_local=None,
 ):
     """
-    Percorre uma pasta principal onde cada subpasta pertence a um formando:
-      1. Verifica `cache_analise_subpastas.json` em 0ms usando `os.scandir` (sem chamadas extras `.stat()` ou `.resolve()`).
-      2. Decodifica fotos novas via C++ `libjpeg-turbo` `IMREAD_REDUCED_COLOR_8` + YuNet 640px (~6ms/foto em paralelo sem GIL).
-      3. Em subpastas grandes (> 24 fotos), analisa em ondas paralelas de 24 fotos com poda inteligente assim que
-         encontra 3+ retratos solo excelentes (>= 88.5 pts) para o molde, evitando ler centenas de fotos de festa/grupo.
-      4. Descarta/rebaixa fotos com estouro de luz no histograma ou baixo contraste (com fallback p/ menos pior + aviso),
-         prioriza maior densidade de pixels no rosto pós-corte e copia a campeã para FOTO.
+    Divide as subpastas dos formandos entre os núcleos da CPU permitidos pelo limite de hardware
+    (`limite_cpu_pct`) usando `multiprocessing.Pool` + GPU OpenCL em prioridade baixa:
+      1. Gera/usa cópia leve local (`.cache_proxies_capaz`) com diminuição de qualidade para rodar
+         toda a análise na máquina local sem gargalo do Google Drive / rede / HD externo.
+      2. Mantém núcleos livres para o usuário trabalhar sem travar o computador.
+      3. Copia em resolução ORIGINAL apenas a foto campeã escolhida para a pasta FOTO.
     """
     pasta_mae = Path(pasta_subpastas)
     if not pasta_mae.is_dir():
@@ -1514,10 +2043,38 @@ def escolher_melhores_fotos_subpastas(
     if calib is None:
         calib = carregar_calibracao(cfg)
 
+    if usar_copia_leve_local is None:
+        usar_copia_leve_local = cfg.get("usar_copia_leve_local", USAR_COPIA_LEVE_LOCAL_PADRAO)
+    usar_copia_leve = bool(usar_copia_leve_local)
+
+    hw = calcular_recursos_hardware(
+        limite_cpu_pct=limite_cpu_pct if limite_cpu_pct is not None else cfg.get("hardware_limite_cpu_pct"),
+        usar_gpu_opencl=usar_gpu_opencl if usar_gpu_opencl is not None else cfg.get("hardware_usar_gpu_opencl"),
+    )
+
     cfg["fotos"].mkdir(parents=True, exist_ok=True)
-    verificar_cache_analise_subpastas(cfg["fotos"])
+    if usar_copia_leve:
+        try:
+            PASTA_PROXIES_ANALISE.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+    if not MODELO_YUNET.is_file():
+        try:
+            urllib.request.urlretrieve(URL_YUNET, MODELO_YUNET)
+        except Exception:
+            pass
+
+    verificar_cache_analise_subpastas(
+        cfg["fotos"],
+        limite_cpu_pct=hw["limite_cpu_pct"],
+        usar_gpu_opencl=hw["usar_gpu_opencl"],
+    )
     cache_an = _carregar_cache_analise_subpastas()
+    cache_r = _carregar_cache_rostos()
     subpastas_cache = cache_an.setdefault("_subpastas", {})
+    destinos_map = cache_an.setdefault("_destinos_copiados", {})
+    _salvar_cache_analise_subpastas()
 
     subpastas = []
     try:
@@ -1543,242 +2100,189 @@ def escolher_melhores_fotos_subpastas(
 
     _, cursos_salvos_nome = _cursos_salvos_por_foto()
     opcoes_salvas = ler_opcoes_foto()
-    relatorio_alunos = []
     total_sub = len(subpastas)
-    # Como cv2.imdecode e YuNet ONNX liberam o GIL em C++, usamos até 12 workers paralelos
-    num_workers = min(12, max(4, (os.cpu_count() or 4) * 2))
+    nucleos_usados = hw["nucleos_usados"]
+    nucleos_totais = hw["nucleos_totais"]
+    tag_hw = f"{nucleos_usados}/{nucleos_totais} núcleos ({hw['limite_cpu_pct']}%)" + (
+        " + GPU OpenCL" if hw["gpu_ativa"] else ""
+    )
+
+    cfg_serial = {
+        "fotos": str(cfg["fotos"]),
+        "moldes": {k: list(v) for k, v in cfg["moldes"].items()},
+        "ampliacao_maxima": float(cfg.get("ampliacao_maxima", 1.2)),
+    }
+
+    tarefas = []
+    for idx_sub, sub in enumerate(subpastas, 1):
+        nome_aluno = formatar_nome(sub.name) if sub != pasta_mae else formatar_nome(pasta_mae.name)
+        ch_aluno = chave(nome_aluno)
+        plano_aluno = mapa_planos.get(ch_aluno) or plano_padrao
+        curso_aluno = mapa_cursos.get(ch_aluno) or cursos_salvos_nome.get(ch_aluno) or curso_padrao
+        tamanhos_necessarios = tamanhos_do_plano(plano_aluno, berlim_modo)
+        tarefas.append({
+            "idx_sub": idx_sub,
+            "sub_str": str(sub),
+            "nome_aluno": nome_aluno,
+            "ch_aluno": ch_aluno,
+            "plano_aluno": plano_aluno,
+            "curso_aluno": curso_aluno,
+            "tamanhos_necessarios": tamanhos_necessarios,
+            "cfg_serial": cfg_serial,
+            "calib": calib,
+            "usar_copia_leve_local": usar_copia_leve,
+        })
+
+    resultados_ordenados = []
     novas_acumuladas_desde_save = 0
+    destinos_para_limpar_manual = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as pool:
-        for idx_sub, sub in enumerate(subpastas, 1):
-            nome_aluno = formatar_nome(sub.name) if sub != pasta_mae else formatar_nome(pasta_mae.name)
-            ch_aluno = chave(nome_aluno)
-            plano_aluno = mapa_planos.get(ch_aluno) or plano_padrao
-            curso_aluno = mapa_cursos.get(ch_aluno) or cursos_salvos_nome.get(ch_aluno) or curso_padrao
-            tamanhos_necessarios = tamanhos_do_plano(plano_aluno, berlim_modo)
+    def _integrar_resultado_worker(res, concluidas):
+        nonlocal novas_acumuladas_desde_save
+        if not res:
+            return
+        rel_item = res["relatorio_item"]
+        rel_item["hardware_resumo"] = tag_hw
+        resultados_ordenados.append((res["idx_sub"], rel_item))
 
-            itens_sub = _listar_imagens_subpasta_com_stat(sub)
-            if not itens_sub:
-                relatorio_alunos.append({
-                    "nome": nome_aluno,
-                    "curso": curso_aluno,
-                    "plano": plano_aluno,
-                    "status": "SEM_FOTOS",
-                    "avisos": ["Nenhuma foto encontrada na subpasta"],
-                    "escolhidas": {},
-                    "do_cache": False,
-                    "fotos_em_cache": 0,
-                    "fotos_analisadas_agora": 0,
-                })
-                continue
+        novas_m = res.get("novas_metricas") or {}
+        novos_r = res.get("novos_rostos") or {}
+        novos_d = res.get("novos_destinos") or {}
+        norm_sub = res.get("norm_sub")
+        sub_entry = res.get("sub_cache_entry")
+        op_aluno = res.get("opcoes_aluno") or {}
+        destinos_para_limpar_manual.extend(res.get("destinos_apagar_manual") or [])
 
-            norm_sub = _norm_caminho_rapido(sub)
-            assinatura_atual = _assinatura_subpasta(itens_sub, tamanhos_necessarios, cfg, calib)
-            reg_sub_cache = subpastas_cache.get(norm_sub)
+        with _cache_rostos_lock:
+            if novas_m:
+                cache_an.update(novas_m)
+            if norm_sub and sub_entry is not None:
+                subpastas_cache[norm_sub] = sub_entry
+            if novos_d:
+                destinos_map.update(novos_d)
+            if novos_r:
+                cache_r.update(novos_r)
+        if op_aluno:
+            opcoes_salvas.update(op_aluno)
 
-            # FAST PATH INSTANTÂNEO (0ms): Subpasta inteira inalterada já consta em cache_analise_subpastas.json
-            if (
-                isinstance(reg_sub_cache, dict)
-                and reg_sub_cache.get("assinatura") == assinatura_atual
-                and isinstance(reg_sub_cache.get("escolhidas"), dict)
-            ):
-                if progresso_cb:
-                    progresso_cb(
-                        idx_sub,
-                        total_sub,
-                        f"Cache instantâneo (0ms): {nome_aluno} ({len(itens_sub)} foto(s) já analisadas)...",
-                    )
-                escolhidas_aluno = reg_sub_cache["escolhidas"]
-                avisos_aluno = list(reg_sub_cache.get("avisos") or [])
-                candidatas_por_tam = reg_sub_cache.get("candidatas_por_tam") or {}
-                rostos_campeas = reg_sub_cache.get("rostos_campeas") or {}
+        novas_agora = int(rel_item.get("fotos_analisadas_agora", 0))
+        novas_acumuladas_desde_save += novas_agora
 
-                for tam, campea in escolhidas_aluno.items():
-                    nome_dest = nome_arquivo_destino_foto(nome_aluno, tam)
-                    destino = cfg["fotos"] / nome_dest
-                    origem_campea = Path(campea["caminho"])
-                    if origem_campea.is_file():
-                        _copiar_foto_campea_rapido(
-                            origem_campea,
-                            destino,
-                            rosto_detectado=rostos_campeas.get(tam),
-                        )
-                    chave_op = f"{ch_aluno}|{tam}"
-                    opcoes_salvas[chave_op] = {
-                        "nome": nome_aluno,
-                        "tamanho": tam,
-                        "arquivo_destino": str(destino),
-                        "escolhida": campea["caminho"],
-                        "aviso_revisao": campea.get("aviso_revisao", ""),
-                        "candidatas": candidatas_por_tam.get(tam, [campea]),
-                    }
-
-                relatorio_alunos.append({
-                    "nome": nome_aluno,
-                    "curso": curso_aluno,
-                    "plano": plano_aluno,
-                    "status": "AVISO_QUALIDADE" if avisos_aluno else ("OK" if escolhidas_aluno else "ERRO"),
-                    "avisos": avisos_aluno,
-                    "escolhidas": escolhidas_aluno,
-                    "do_cache": True,
-                    "fotos_em_cache": len(itens_sub),
-                    "fotos_analisadas_agora": 0,
-                })
-                continue
-
-            # 1) Verifica foto a foto em cache_analise_subpastas.json usando stat já coletado pelo os.scandir
-            metricas_por_arquivo = {}
-            fotos_para_analisar = []
-            fotos_hit_cache = 0
-            for arq, mtime_ns, fsize in itens_sub:
-                ch_an = f"{_norm_caminho_rapido(arq)}|{mtime_ns}|{fsize}|v2"
-                if ch_an in cache_an and isinstance(cache_an[ch_an], dict):
-                    metricas_por_arquivo[str(arq)] = cache_an[ch_an]
-                    fotos_hit_cache += 1
-                else:
-                    fotos_para_analisar.append((arq, mtime_ns, fsize))
-
-            fotos_analisadas_sub = 0
-            if fotos_para_analisar:
-                # Em pastas grandes, prioriza arquivos de maior densidade/tamanho (retratos de estúdio costumam ter mais bytes)
-                if len(fotos_para_analisar) > MAX_FOTOS_POR_ONDA_SUBPASTA:
-                    fotos_para_analisar.sort(key=lambda item: item[2], reverse=True)
-
-                total_novas = len(fotos_para_analisar)
-                for inicio_onda in range(0, total_novas, MAX_FOTOS_POR_ONDA_SUBPASTA):
-                    onda = fotos_para_analisar[inicio_onda:inicio_onda + MAX_FOTOS_POR_ONDA_SUBPASTA]
-                    if progresso_cb:
-                        progresso_cb(
-                            idx_sub,
-                            total_sub,
-                            f"Analisando {nome_aluno} ({fotos_hit_cache + fotos_analisadas_sub + len(onda)}/{len(itens_sub)} fotos)...",
-                        )
-                    futuros_onda = {
-                        pool.submit(_extrair_metricas_base_foto, arq, mtime_ns, fsize): arq
-                        for arq, mtime_ns, fsize in onda
-                    }
-                    for fut in concurrent.futures.as_completed(futuros_onda):
-                        arq = futuros_onda[fut]
-                        try:
-                            metricas_por_arquivo[str(arq)] = fut.result()
-                            fotos_analisadas_sub += 1
-                            novas_acumuladas_desde_save += 1
-                        except Exception:
-                            pass
-
-                    # Poda inteligente: se a subpasta é enorme e já temos 3+ retratos solo excelentes p/ todos os moldes, para!
-                    if (
-                        inicio_onda + MAX_FOTOS_POR_ONDA_SUBPASTA < total_novas
-                        and _ja_tem_candidatas_excelentes(metricas_por_arquivo, tamanhos_necessarios, cfg, calib)
-                    ):
-                        break
-
-                # Salva o cache incrementalmente a cada 36 fotos novas para nunca perder progresso
-                if novas_acumuladas_desde_save >= 36:
-                    _salvar_cache_analise_subpastas()
-                    novas_acumuladas_desde_save = 0
-
-            escolhidas_aluno = {}
-            avisos_aluno = []
-            candidatas_por_tam = {}
-            rostos_campeas = {}
-
-            for tam in tamanhos_necessarios:
-                molde = cfg["moldes"].get(tam, MOLDES_PADRAO.get(tam, (3874, 3012)))
-                calib_tam = calib.get(tam, CALIBRACAO_PADRAO)
-                amp_max = cfg.get("ampliacao_maxima", 1.2)
-
-                # 2) Simulação matemática instantânea (< 0.2 ms) para o molde usando as métricas já extraídas
-                avaliacoes = []
-                for arq, _, _ in itens_sub:
-                    m_base = metricas_por_arquivo.get(str(arq))
-                    if m_base is None:
-                        continue
-                    try:
-                        avaliacoes.append(
-                            avaliar_foto_para_molde(
-                                arq,
-                                tam,
-                                molde,
-                                calib_tam,
-                                amp_max,
-                                metricas_base=m_base,
-                            )
-                        )
-                    except Exception:
-                        pass
-
-                if not avaliacoes:
-                    continue
-
-                avaliacoes.sort(
-                    key=lambda a: (
-                        1 if a.get("valida") else 0,
-                        1 if a.get("qtd_pessoas") == 1 else (0 if a.get("qtd_pessoas", 0) > 1 else -1),
-                        1 if a.get("aprovada_qualidade") else 0,
-                        float(a.get("nota", 0.0)),
-                        int(a.get("densidade_rosto_px", 0)),
-                        int(a.get("encaixe_pct", 0)),
-                    ),
-                    reverse=True,
+        if progresso_cb:
+            if rel_item.get("do_cache"):
+                progresso_cb(
+                    concluidas,
+                    total_sub,
+                    f"Hardware [{tag_hw}] · Cache 0ms: {res['nome_aluno']} ({res.get('total_itens_sub', 0)} fotos)...",
+                )
+            else:
+                tag_proxy = "cópia leve local" if usar_copia_leve else "direto"
+                progresso_cb(
+                    concluidas,
+                    total_sub,
+                    f"Hardware [{tag_hw}] · {res['nome_aluno']} ({novas_agora} via {tag_proxy} / {rel_item.get('fotos_em_cache', 0)} cache)...",
                 )
 
-                campea = dict(avaliacoes[0])
-                if not campea.get("aprovada_qualidade") and campea.get("aviso_qualidade"):
-                    aviso_msg = f"Escolhida a menos pior p/ {tam} ({campea['aviso_qualidade']})"
-                    campea["aviso_revisao"] = aviso_msg
-                    avisos_aluno.append(aviso_msg)
-                else:
-                    campea["aviso_revisao"] = ""
+        if novas_acumuladas_desde_save >= 36:
+            _salvar_cache_analise_subpastas()
+            novas_acumuladas_desde_save = 0
 
-                nome_dest = nome_arquivo_destino_foto(nome_aluno, tam)
-                destino = cfg["fotos"] / nome_dest
+    # Caso 1: Múltiplas subpastas -> divide as subpastas entre os núcleos permitidos pelo limite de CPU
+    if total_sub >= 2:
+        num_processos = max(1, min(total_sub, nucleos_usados))
+        if progresso_cb:
+            progresso_cb(
+                0,
+                total_sub,
+                f"Iniciando seleção com {tag_hw} ({hw['nucleos_livres']} núcleos livres p/ não travar o PC)...",
+            )
+        usou_mp_pool = False
+        try:
+            with multiprocessing.Pool(
+                processes=num_processos,
+                initializer=_init_worker_pool_subpastas,
+                initargs=(hw["usar_gpu_opencl"],),
+            ) as pool:
+                concluidas = 0
+                for res in pool.imap_unordered(_processar_subpasta_worker, tarefas, chunksize=1):
+                    concluidas += 1
+                    _integrar_resultado_worker(res, concluidas)
+            usou_mp_pool = True
+        except Exception:
+            usou_mp_pool = False
 
-                origem_campea = Path(campea["caminho"])
-                m_campea = metricas_por_arquivo.get(str(origem_campea)) or {}
-                rosto_campea = (m_campea.get("rostos") or [None])[0]
-                rostos_campeas[tam] = rosto_campea
-                _copiar_foto_campea_rapido(origem_campea, destino, rosto_detectado=rosto_campea)
-                apagar_manual(destino)
+        if not usou_mp_pool:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_processos) as tpool:
+                concluidas = 0
+                for res in tpool.map(_processar_subpasta_worker, tarefas):
+                    concluidas += 1
+                    _integrar_resultado_worker(res, concluidas)
+    else:
+        # Caso 2: Apenas 1 pasta selecionada -> usa multiprocessing.Pool limitado a nucleos_usados
+        t_unica = tarefas[0]
+        sub_unica = Path(t_unica["sub_str"])
+        itens_unica = _listar_imagens_subpasta_com_stat(sub_unica)
+        faltantes_unica = []
+        for arq, mtime_ns, fsize in itens_unica:
+            ch_an = f"{_norm_caminho_rapido(arq)}|{mtime_ns}|{fsize}|v2"
+            if ch_an not in cache_an:
+                faltantes_unica.append((str(arq), mtime_ns, fsize, usar_copia_leve))
 
-                top_candidatas = avaliacoes[:6]
-                candidatas_por_tam[tam] = top_candidatas
-                chave_op = f"{ch_aluno}|{tam}"
-                opcoes_salvas[chave_op] = {
-                    "nome": nome_aluno,
-                    "tamanho": tam,
-                    "arquivo_destino": str(destino),
-                    "escolhida": campea["caminho"],
-                    "aviso_revisao": campea.get("aviso_revisao", ""),
-                    "candidatas": top_candidatas,
-                }
-                escolhidas_aluno[tam] = campea
+        if len(faltantes_unica) >= 2:
+            if len(faltantes_unica) > MAX_FOTOS_POR_ONDA_SUBPASTA:
+                faltantes_unica.sort(key=lambda item: item[2], reverse=True)
+            num_processos = max(1, min(len(faltantes_unica), nucleos_usados))
+            try:
+                with multiprocessing.Pool(
+                    processes=num_processos,
+                    initializer=_init_worker_pool_subpastas,
+                    initargs=(hw["usar_gpu_opencl"],),
+                ) as pool:
+                    for inicio_onda in range(0, len(faltantes_unica), MAX_FOTOS_POR_ONDA_SUBPASTA):
+                        onda = faltantes_unica[inicio_onda:inicio_onda + MAX_FOTOS_POR_ONDA_SUBPASTA]
+                        if progresso_cb:
+                            progresso_cb(
+                                1,
+                                1,
+                                f"Hardware [{tag_hw}] · Analisando cópia leve de {t_unica['nome_aluno']} ({min(len(itens_unica), inicio_onda + len(onda))}/{len(itens_unica)} fotos)...",
+                            )
+                        for ch_an, ch_r, m_base in pool.imap_unordered(_extrair_metricas_foto_worker, onda, chunksize=2):
+                            if m_base is not None:
+                                with _cache_rostos_lock:
+                                    cache_an[ch_an] = m_base
+                                    rostos_l = m_base.get("rostos") or []
+                                    cache_r[ch_r] = rostos_l[0] if rostos_l else None
+                        metricas_atuais = {
+                            str(arq): cache_an.get(f"{_norm_caminho_rapido(arq)}|{mtime_ns}|{fsize}|v2")
+                            for arq, mtime_ns, fsize in itens_unica
+                            if f"{_norm_caminho_rapido(arq)}|{mtime_ns}|{fsize}|v2" in cache_an
+                        }
+                        if (
+                            inicio_onda + MAX_FOTOS_POR_ONDA_SUBPASTA < len(faltantes_unica)
+                            and _ja_tem_candidatas_excelentes(
+                                metricas_atuais, t_unica["tamanhos_necessarios"], cfg, calib
+                            )
+                        ):
+                            break
+                _salvar_cache_analise_subpastas()
+            except Exception:
+                pass
 
-            with _cache_rostos_lock:
-                subpastas_cache[norm_sub] = {
-                    "assinatura": assinatura_atual,
-                    "escolhidas": escolhidas_aluno,
-                    "avisos": avisos_aluno,
-                    "candidatas_por_tam": candidatas_por_tam,
-                    "rostos_campeas": rostos_campeas,
-                }
+        res_unico = _processar_subpasta_worker(t_unica)
+        _integrar_resultado_worker(res_unico, 1)
 
-            relatorio_alunos.append({
-                "nome": nome_aluno,
-                "curso": curso_aluno,
-                "plano": plano_aluno,
-                "status": "AVISO_QUALIDADE" if avisos_aluno else ("OK" if escolhidas_aluno else "ERRO"),
-                "avisos": avisos_aluno,
-                "escolhidas": escolhidas_aluno,
-                "do_cache": fotos_analisadas_sub == 0,
-                "fotos_em_cache": fotos_hit_cache,
-                "fotos_analisadas_agora": fotos_analisadas_sub,
-            })
+    for dest_str in destinos_para_limpar_manual:
+        try:
+            apagar_manual(Path(dest_str))
+        except Exception:
+            pass
 
     _salvar_cache_analise_subpastas()
     _salvar_cache_rostos()
     gravar_opcoes_foto(opcoes_salvas)
-    return relatorio_alunos
+
+    resultados_ordenados.sort(key=lambda par: par[0])
+    return [item for _, item in resultados_ordenados]
 
 
 def trocar_foto_por_opcao(nome_aluno, tam, caminho_origem, cfg):
@@ -3481,4 +3985,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     sys.exit(main())

@@ -8,6 +8,7 @@ e roda AUTOMAÇAO-PASTA.py em um processo separado.
 """
 
 import json
+import multiprocessing
 import os
 import re
 import shutil
@@ -376,6 +377,13 @@ class JanelaCapas:
 
         self._configurar_estilo()
 
+        cfg_inicial = {}
+        try:
+            if CONFIG.is_file():
+                cfg_inicial = json.loads(CONFIG.read_text(encoding="utf-8"))
+        except Exception:
+            cfg_inicial = {}
+
         self.origem = tk.StringVar(value="fotos")
         self.planilha = tk.StringVar()
         self.curso_todos = tk.StringVar()
@@ -390,6 +398,17 @@ class JanelaCapas:
         self.refazer = tk.BooleanVar(value=False)
         self.berlim = tk.StringVar(value="Ambos")
         self.tipo_saida = tk.StringVar(value=self._tipo_saida_config())
+        self.limite_cpu_pct = tk.DoubleVar(
+            value=float(max(25, min(85, int(cfg_inicial.get("hardware_limite_cpu_pct", 60)))))
+        )
+        self.usar_gpu_opencl = tk.BooleanVar(
+            value=bool(cfg_inicial.get("hardware_usar_gpu_opencl", True))
+        )
+        self.usar_copia_leve_local = tk.BooleanVar(
+            value=bool(cfg_inicial.get("usar_copia_leve_local", True))
+        )
+        self.preset_hardware = tk.StringVar(value="60% (Equilibrado)")
+        self.resumo_hardware = tk.StringVar(value="")
         self.parando = False
         self.status = tk.StringVar(
             value="Sem planilha: as capas saem das fotos da pasta. Cole alunos ou escolha uma planilha se quiser."
@@ -398,6 +417,7 @@ class JanelaCapas:
         self.fila = []
 
         self._montar()
+        self._atualizar_resumo_hardware(salvar=False)
         self._carregar_ultima_colagem()
         self.planilha.trace_add("write", lambda *a: self._planilha_mudou())
         root.protocol("WM_DELETE_WINDOW", self._fechar)
@@ -642,49 +662,106 @@ class JanelaCapas:
         topo_rapido = ttk.Frame(principal)
         topo_rapido.grid(row=0, column=0, sticky="we")
 
+        linha_rapida_1 = ttk.Frame(topo_rapido)
+        linha_rapida_1.pack(fill="x")
+
         self.botao_ler_fotos = ttk.Button(
-            topo_rapido, text="Carregar Fotos da Pasta (1 Clique)", style="Primario.TButton",
+            linha_rapida_1, text="Carregar Fotos da Pasta (1 Clique)", style="Primario.TButton",
             command=self.ler_fotos,
         )
         self.botao_ler_fotos.pack(side="left", padx=(0, 6))
 
         self.botao_escolher_fotos = ttk.Button(
-            topo_rapido, text="Escolher Melhores Fotos (Subpastas)", style="Primario.TButton",
+            linha_rapida_1, text="Escolher Melhores Fotos (Subpastas)", style="Primario.TButton",
             command=self._escolher_melhores_fotos_subpastas,
         )
         self.botao_escolher_fotos.pack(side="left", padx=(0, 10))
 
-        ttk.Label(topo_rapido, text="Curso p/ todos:").pack(side="left", padx=(4, 4))
+        ttk.Label(linha_rapida_1, text="Curso p/ todos:").pack(side="left", padx=(4, 4))
         self.campo_curso_todos = ttk.Combobox(
-            topo_rapido, textvariable=self.curso_todos, width=24, postcommand=self._listar_cursos_todos
+            linha_rapida_1, textvariable=self.curso_todos, width=24, postcommand=self._listar_cursos_todos
         )
         self.campo_curso_todos.pack(side="left")
         self.campo_curso_todos.bind("<Return>", lambda e: self._aplicar_curso_todos())
         self.campo_curso_todos.bind("<<ComboboxSelected>>", lambda e: self._aplicar_curso_todos())
         ttk.Button(
-            topo_rapido, text="Aplicar", command=self._aplicar_curso_todos
+            linha_rapida_1, text="Aplicar", command=self._aplicar_curso_todos
         ).pack(side="left", padx=(4, 12))
 
-        ttk.Label(topo_rapido, text="Plano p/ todos:").pack(side="left", padx=(4, 4))
+        ttk.Label(linha_rapida_1, text="Plano p/ todos:").pack(side="left", padx=(4, 4))
         self.campo_plano_todos = ttk.Combobox(
-            topo_rapido, textvariable=self.plano_todos, width=22, postcommand=self._listar_planos)
+            linha_rapida_1, textvariable=self.plano_todos, width=22, postcommand=self._listar_planos)
         self.campo_plano_todos.pack(side="left")
         self.campo_plano_todos.bind("<Return>", lambda e: self._aplicar_plano_todos())
         self.campo_plano_todos.bind("<<ComboboxSelected>>", lambda e: self._aplicar_plano_todos())
         ttk.Button(
-            topo_rapido, text="Aplicar", command=self._aplicar_plano_todos
+            linha_rapida_1, text="Aplicar", command=self._aplicar_plano_todos
         ).pack(side="left", padx=(4, 12))
 
         ttk.Button(
-            topo_rapido, text="Ir para Revisão e Recorte ->",
+            linha_rapida_1, text="Ir para Revisão e Recorte ->",
             command=lambda: self.abas.select(self.quadro_revisao),
         ).pack(side="left", padx=(4, 0))
 
         self.mostrar_avancado = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            topo_rapido, text="Usar planilha / Opções avançadas",
+            linha_rapida_1, text="Usar planilha / Opções avançadas",
             variable=self.mostrar_avancado, command=self._alternar_modo_avancado,
         ).pack(side="right")
+
+        # ---------------- Barra de Cópia Leve Local + Limite de Hardware (Sem Travar o PC) ----------------
+
+        barra_hardware = ttk.Frame(topo_rapido)
+        barra_hardware.pack(fill="x", pady=(6, 0))
+
+        ttk.Checkbutton(
+            barra_hardware,
+            text="Cópia leve local p/ analisar (Original só na escolhida)",
+            variable=self.usar_copia_leve_local,
+            command=lambda: self._atualizar_resumo_hardware(salvar=True),
+        ).pack(side="left", padx=(0, 12))
+
+        ttk.Label(barra_hardware, text="Limite de Hardware (CPU):").pack(side="left", padx=(0, 4))
+        self.escala_hardware = ttk.Scale(
+            barra_hardware,
+            from_=25,
+            to=85,
+            variable=self.limite_cpu_pct,
+            orient="horizontal",
+            length=135,
+            command=lambda _v: self._atualizar_resumo_hardware(salvar=False),
+        )
+        self.escala_hardware.pack(side="left", padx=(0, 6))
+        self.escala_hardware.bind("<ButtonRelease-1>", lambda e: self._atualizar_resumo_hardware(salvar=True))
+
+        self.combo_preset_hardware = ttk.Combobox(
+            barra_hardware,
+            textvariable=self.preset_hardware,
+            state="readonly",
+            width=19,
+            values=(
+                "30% (Leve)",
+                "50% (Metade livre)",
+                "60% (Equilibrado)",
+                "75% (Rápido)",
+                "85% (Turbo controlado)",
+            ),
+        )
+        self.combo_preset_hardware.pack(side="left", padx=(0, 10))
+        self.combo_preset_hardware.bind("<<ComboboxSelected>>", self._escolheu_preset_hardware)
+
+        ttk.Checkbutton(
+            barra_hardware,
+            text="Impulsionar c/ GPU (OpenCL)",
+            variable=self.usar_gpu_opencl,
+            command=lambda: self._atualizar_resumo_hardware(salvar=True),
+        ).pack(side="left", padx=(0, 10))
+
+        ttk.Label(
+            barra_hardware,
+            textvariable=self.resumo_hardware,
+            style="Dica.TLabel",
+        ).pack(side="left")
 
         # ---------------- Painel Avançado (Oculto por padrão para não poluir) ----------------
 
@@ -866,6 +943,52 @@ class JanelaCapas:
 
         self._atualizar_origem()
 
+    def _escolheu_preset_hardware(self, evento=None):
+        txt = self.preset_hardware.get()
+        for num in (30, 50, 60, 75, 85):
+            if str(num) in txt:
+                self.limite_cpu_pct.set(float(num))
+                break
+        self._atualizar_resumo_hardware(salvar=True)
+
+    def _atualizar_resumo_hardware(self, salvar=True):
+        pct = max(25, min(85, int(round(float(self.limite_cpu_pct.get() or 60)))))
+        usar_gpu = bool(self.usar_gpu_opencl.get())
+        usar_proxy = bool(self.usar_copia_leve_local.get())
+
+        if pct <= 35:
+             self.preset_hardware.set("30% (Leve)")
+        elif pct <= 54:
+            self.preset_hardware.set("50% (Metade livre)")
+        elif pct <= 67:
+            self.preset_hardware.set("60% (Equilibrado)")
+        elif pct <= 80:
+            self.preset_hardware.set("75% (Rápido)")
+        else:
+            self.preset_hardware.set("85% (Turbo controlado)")
+
+        nucleos_totais = max(1, os.cpu_count() or 4)
+        max_permitido = max(1, nucleos_totais - 1) if nucleos_totais > 1 else 1
+        nucleos_usados = min(max_permitido, max(1, int(round(nucleos_totais * (pct / 100.0)))))
+        nucleos_livres = max(0, nucleos_totais - nucleos_usados)
+
+        gpu_txt = " + GPU OpenCL" if usar_gpu else " (só CPU)"
+        proxy_txt = "Proxy leve ativo" if usar_proxy else "Leitura direta"
+        self.resumo_hardware.set(
+            f"Usando {nucleos_usados}/{nucleos_totais} núcleos ({pct}% · {nucleos_livres} livres p/ não travar){gpu_txt} · {proxy_txt}"
+        )
+
+        if salvar:
+            try:
+                rf = modulo_recorte()
+                rf.gravar_config({
+                    "hardware_limite_cpu_pct": pct,
+                    "hardware_usar_gpu_opencl": usar_gpu,
+                    "usar_copia_leve_local": usar_proxy,
+                })
+            except Exception:
+                pass
+
     def _alternar_modo_avancado(self):
         if self.mostrar_avancado.get():
             self.quadro_avancado.grid(row=2, column=0, sticky="we", pady=(6, 0))
@@ -901,7 +1024,10 @@ class JanelaCapas:
         try:
             rf = modulo_recorte()
             if hasattr(rf, "verificar_cache_analise_subpastas"):
-                info_cache = rf.verificar_cache_analise_subpastas()
+                info_cache = rf.verificar_cache_analise_subpastas(
+                    limite_cpu_pct=int(round(self.limite_cpu_pct.get())),
+                    usar_gpu_opencl=bool(self.usar_gpu_opencl.get()),
+                )
                 if info_cache.get("existe"):
                     self.status.set(
                         f"Cache carregado (cache_analise_subpastas.json: {info_cache.get('fotos_em_cache', 0)} foto(s), "
@@ -986,6 +1112,8 @@ class JanelaCapas:
         self._lendo_fotos = True
         self.botao_ler_fotos.configure(state="disabled")
         self.status.set("Verificando cache_analise_subpastas.json e lendo as fotos da pasta...")
+        limite_pct = int(round(self.limite_cpu_pct.get() or 60))
+        usar_gpu = bool(self.usar_gpu_opencl.get())
 
         def trabalho():
             erro = None
@@ -1002,7 +1130,12 @@ class JanelaCapas:
                 if not Path(cfg["fotos"]).is_dir():
                     raise RuntimeError("Pasta de fotos não encontrada: " + str(cfg["fotos"]))
                 if hasattr(rf, "verificar_cache_analise_subpastas"):
-                    info_cache = rf.verificar_cache_analise_subpastas(cfg["fotos"])
+                    info_cache = rf.verificar_cache_analise_subpastas(
+                        cfg["fotos"],
+                        processar_pendentes_pool=True,
+                        limite_cpu_pct=limite_pct,
+                        usar_gpu_opencl=usar_gpu,
+                    )
                 alunos = rf.alunos_das_fotos(cfg["fotos"])
             except Exception as e:
                 erro = str(e)
@@ -1064,8 +1197,17 @@ class JanelaCapas:
         if not pasta:
             return
 
+        limite_pct = max(25, min(85, int(round(self.limite_cpu_pct.get() or 60))))
+        usar_gpu = bool(self.usar_gpu_opencl.get())
+        usar_proxy = bool(self.usar_copia_leve_local.get())
+
         try:
-            rf.gravar_config({"subpastas_fotos_dir": pasta})
+            rf.gravar_config({
+                "subpastas_fotos_dir": pasta,
+                "hardware_limite_cpu_pct": limite_pct,
+                "hardware_usar_gpu_opencl": usar_gpu,
+                "usar_copia_leve_local": usar_proxy,
+            })
         except Exception:
             pass
 
@@ -1074,15 +1216,31 @@ class JanelaCapas:
         self.botao_ler_fotos.configure(state="disabled")
         self._limpar_saida()
 
-        info_cache = rf.verificar_cache_analise_subpastas() if hasattr(rf, "verificar_cache_analise_subpastas") else {}
+        info_cache = (
+            rf.verificar_cache_analise_subpastas(limite_cpu_pct=limite_pct, usar_gpu_opencl=usar_gpu)
+            if hasattr(rf, "verificar_cache_analise_subpastas")
+            else {}
+        )
+        nucleos_totais = info_cache.get("nucleos_cpu") or max(1, os.cpu_count() or 4)
+        nucleos_usados = info_cache.get("nucleos_usados") or max(1, int(round(nucleos_totais * (limite_pct / 100.0))))
+        nucleos_livres = max(0, nucleos_totais - nucleos_usados)
+        modo_proxy_txt = (
+            "Cópia leve local (.cache_proxies_capaz ~45KB) p/ analisar + Original na escolhida"
+            if usar_proxy
+            else "Leitura direta com DCT 1/8"
+        )
         self._escrever(
-            "Iniciando seleção ultra-rápida (C++ IMREAD_REDUCED_COLOR_8 1/8 DCT + YuNet 640px + os.scandir + cache_analise_subpastas.json) em: "
+            f"Iniciando seleção acelerada pelo seu hardware ({nucleos_usados}/{nucleos_totais} núcleos = {limite_pct}% · {nucleos_livres} livres p/ não travar"
+            + (" + GPU OpenCL" if usar_gpu else "")
+            + " · Prioridade Baixa) em: "
             + pasta + "\n"
         )
+        self._escrever(f"Modo de leitura da pasta: {modo_proxy_txt}\n")
         if info_cache.get("existe"):
             self._escrever(
-                f"Cache em disco verificado: {info_cache.get('fotos_em_cache', 0)} foto(s) e "
-                f"{info_cache.get('subpastas_em_cache', 0)} subpasta(s) prontas para carregamento instantâneo (0ms)!\n"
+                f"Cache em disco verificado: {info_cache.get('fotos_em_cache', 0)} foto(s), "
+                f"{info_cache.get('subpastas_em_cache', 0)} subpasta(s) e "
+                f"{info_cache.get('proxies_locais', 0)} cópia(s) leve(s) pronta(s) para carregamento instantâneo!\n"
             )
         self._escrever(
             "Critérios: Pessoa sozinha · Densidade de pixels no rosto pós-corte (peso alto + desempate) · "
@@ -1113,6 +1271,9 @@ class JanelaCapas:
                     curso_padrao=curso_padrao,
                     berlim_modo=berlim_modo,
                     progresso_cb=progresso,
+                    limite_cpu_pct=limite_pct,
+                    usar_gpu_opencl=usar_gpu,
+                    usar_copia_leve_local=usar_proxy,
                 )
             except Exception as e:
                 erro = str(e)
@@ -1137,12 +1298,14 @@ class JanelaCapas:
         subpastas_cache_count = 0
         fotos_cache_total = 0
         fotos_novas_total = 0
+        proxies_total = 0
         for item in relatorio:
             escolhidas = item.get("escolhidas") or {}
             avisos_item = item.get("avisos") or []
             do_cache = bool(item.get("do_cache", False))
             fotos_cache_total += int(item.get("fotos_em_cache", 0))
             fotos_novas_total += int(item.get("fotos_analisadas_agora", 0))
+            proxies_total += int(item.get("proxies_usados", 0))
             if do_cache:
                 subpastas_cache_count += 1
             tag_cache = " [CACHE INSTANTÂNEO]" if do_cache else ""
@@ -1166,9 +1329,9 @@ class JanelaCapas:
                 self._escrever(f"AVISO — {item['nome']}: nenhuma foto encontrada na subpasta.\n")
 
         self._escrever(
-            f"\nResumo do Cache (cache_analise_subpastas.json): {subpastas_cache_count}/{len(relatorio)} subpasta(s) instantâneas "
-            f"| {fotos_cache_total} foto(s) lidas do cache | {fotos_novas_total} foto(s) analisadas agora "
-            f"| Tempo total: {tempo_seg * 1000:.0f} ms\n"
+            f"\nResumo: {subpastas_cache_count}/{len(relatorio)} subpasta(s) instantâneas do cache "
+            f"| {fotos_cache_total} foto(s) em cache | {fotos_novas_total} analisada(s) agora ({proxies_total} via cópia leve local) "
+            f"| Original copiada apenas nas campeãs | Tempo total: {tempo_seg * 1000:.0f} ms\n"
         )
 
         # Atualiza a tabela com os alunos e planos processados
@@ -4785,4 +4948,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()
