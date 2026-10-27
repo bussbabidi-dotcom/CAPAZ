@@ -30,6 +30,8 @@ import shutil
 import statistics
 import sys
 import tempfile
+import threading
+import concurrent.futures
 import unicodedata
 import urllib.request
 from pathlib import Path
@@ -379,18 +381,75 @@ def listar_fotos(pasta):
 
 _detector = None
 _haar = None
+_tls_detector = threading.local()
+_cache_rostos_lock = threading.Lock()
+CACHE_ROSTOS_FILE = PASTA / "cache_rostos_yunet.json"
+_cache_rostos_mem = None
+
+
+def _carregar_cache_rostos():
+    global _cache_rostos_mem
+    with _cache_rostos_lock:
+        if _cache_rostos_mem is not None:
+            return _cache_rostos_mem
+        if CACHE_ROSTOS_FILE.is_file():
+            try:
+                _cache_rostos_mem = json.loads(CACHE_ROSTOS_FILE.read_text(encoding="utf-8"))
+                if isinstance(_cache_rostos_mem, dict):
+                    return _cache_rostos_mem
+            except Exception:
+                pass
+        _cache_rostos_mem = {}
+        return _cache_rostos_mem
+
+
+def _salvar_cache_rostos():
+    with _cache_rostos_lock:
+        if _cache_rostos_mem is None:
+            return
+        try:
+            temp = CACHE_ROSTOS_FILE.with_suffix(".tmp")
+            temp.write_text(json.dumps(_cache_rostos_mem, ensure_ascii=False), encoding="utf-8")
+            os.replace(temp, CACHE_ROSTOS_FILE)
+        except Exception:
+            pass
+
+
+def detectar_rosto_cache(caminho, img=None):
+    """Busca o rosto no cache persistente por (caminho, mtime_ns, size) antes de rodar o YuNet ONNX."""
+    caminho_p = Path(caminho)
+    chave_cache = None
+    try:
+        st = caminho_p.stat()
+        chave_cache = f"{os.path.normcase(str(caminho_p.resolve()))}|{st.st_mtime_ns}|{st.st_size}"
+        cache = _carregar_cache_rostos()
+        if chave_cache in cache:
+            return cache[chave_cache]
+    except Exception:
+        pass
+    if img is None:
+        img, _, _ = abrir_foto(caminho_p)
+    rosto = detectar_rosto(img)
+    if chave_cache is not None:
+        cache = _carregar_cache_rostos()
+        with _cache_rostos_lock:
+            cache[chave_cache] = rosto
+        _salvar_cache_rostos()
+    return rosto
 
 
 def detector_yunet():
-    global _detector
-    if _detector is None:
-        if not MODELO_YUNET.is_file():
-            print("Baixando modelo de detecção de rosto...")
-            urllib.request.urlretrieve(URL_YUNET, MODELO_YUNET)
-        _detector = cv2.FaceDetectorYN.create(
+    det = getattr(_tls_detector, "detector", None)
+    if det is None:
+        with _cache_rostos_lock:
+            if not MODELO_YUNET.is_file():
+                print("Baixando modelo de detecção de rosto...")
+                urllib.request.urlretrieve(URL_YUNET, MODELO_YUNET)
+        det = cv2.FaceDetectorYN.create(
             str(MODELO_YUNET), "", (320, 320), 0.7, 0.3, 5000
         )
-    return _detector
+        _tls_detector.detector = det
+    return det
 
 
 def detectar_rosto(img):
@@ -628,6 +687,8 @@ def calcular_recorte(img_size, rosto, molde, calib):
     """Retorna (left, top, right, bottom) na imagem original."""
     W, H = img_size
     mw, mh = molde
+    if not rosto:
+        return ajustar_caixa((0, 0, W, H), img_size, molde)
 
     crop_h = rosto["h"] / calib["altura_rosto"]
     crop_w = crop_h * mw / mh
@@ -666,9 +727,9 @@ def salvar_jpg(img, destino, icc, dpi):
     os.replace(temp, destino)
 
 
-def caixa_automatica(img, tam, cfg, calib):
-    """(caixa, rosto) pelo rosto detectado; (None, None) sem rosto."""
-    rosto = detectar_rosto(img)
+def caixa_automatica(img, tam, cfg, calib, caminho=None):
+    """(caixa, rosto) pelo rosto detectado (com cache persistente se caminho informado); (None, None) sem rosto."""
+    rosto = detectar_rosto_cache(caminho, img) if caminho else detectar_rosto(img)
     if not rosto:
         return None, None
     return calcular_recorte(img.size, rosto, cfg["moldes"][tam], calib[tam]), rosto
@@ -775,7 +836,7 @@ def processar(cfg, calib, simular, filtro_aluno, filtro_tamanho):
             if caixa:
                 metodo = "corte manual"
             else:
-                caixa, rosto = caixa_automatica(img, tam, cfg, calib)
+                caixa, rosto = caixa_automatica(img, tam, cfg, calib, fonte_original(f, cfg))
                 if not caixa:
                     registro.update(status="ERRO", motivo="rosto não encontrado")
                     print("  ERRO: rosto não encontrado")
@@ -1124,10 +1185,9 @@ def gerar_preset_curso(tamanho, simbolo, rgb=None, _psd=None):
     try:
         config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         caminho_psd = Path(config["psd_dir"]) / PSD_POR_TAMANHO[tamanho][0]
-    except (OSError, KeyError, json.JSONDecodeError) as erro:
-        raise FileNotFoundError("Configuração dos PSDs indisponível.") from erro
-    if not caminho_psd.is_file():
-        raise FileNotFoundError("PSD não encontrado: " + str(caminho_psd))
+        mtime_psd = caminho_psd.stat().st_mtime_ns if caminho_psd.is_file() else None
+    except (OSError, KeyError, json.JSONDecodeError):
+        caminho_psd, mtime_psd = None, None
 
     tamanho_cor = "semcor" if rgb is None else "%02x%02x%02x" % rgb
     slug = re.sub(r"[^a-z0-9_-]+", "_", _chave_brasao(simbolo)).strip("_")
@@ -1137,7 +1197,6 @@ def gerar_preset_curso(tamanho, simbolo, rgb=None, _psd=None):
     chave_cache = tamanho + "_" + slug + "_" + tamanho_cor
     arquivo_demo = diretorio / (chave_cache + ".png")
     arquivo_info = diretorio / (chave_cache + ".json")
-    mtime_psd = caminho_psd.stat().st_mtime_ns
     chave_base = tamanho + "_" + tamanho_cor
     arquivos_base = {
         nome: diretorio_base / (chave_base + "_" + nome + ".png")
@@ -1150,7 +1209,7 @@ def gerar_preset_curso(tamanho, simbolo, rgb=None, _psd=None):
             and all(caminho.is_file() for caminho in arquivos_base.values())):
         try:
             info = json.loads(arquivo_info.read_text(encoding="utf-8"))
-            if (info.get("psd_mtime_ns") == mtime_psd
+            if ((mtime_psd is None or info.get("psd_mtime_ns") == mtime_psd)
                     and info.get("versao") == VERSAO_PRESET_CURSO
                     and info.get("rgb") == (list(rgb) if rgb is not None else None)):
                 resultado = dict(info)
@@ -1165,6 +1224,9 @@ def gerar_preset_curso(tamanho, simbolo, rgb=None, _psd=None):
                 return resultado
         except (OSError, json.JSONDecodeError):
             pass
+
+    if caminho_psd is None or not caminho_psd.is_file():
+        raise FileNotFoundError("PSD não encontrado: " + str(caminho_psd or tamanho))
 
     from psd_tools import PSDImage
 
@@ -1302,17 +1364,18 @@ def _verso_preset(tamanho, simbolo, rgb, altura):
     try:
         config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         caminho_psd = Path(config["psd_dir"]) / dados["psd"]
+        mtime_psd = caminho_psd.stat().st_mtime_ns if caminho_psd.is_file() else None
     except (OSError, KeyError, json.JSONDecodeError):
-        return None
-    if not caminho_psd.is_file():
-        return None
+        caminho_psd, mtime_psd = None, None
 
     slug = re.sub(r"[^a-z0-9_-]+", "_", _chave_brasao(simbolo)).strip("_")
     arquivo = _arquivo_verso_preset(tamanho, slug, rgb)
-    if arquivo.is_file() and arquivo.stat().st_mtime_ns >= caminho_psd.stat().st_mtime_ns:
+    if arquivo.is_file() and (mtime_psd is None or arquivo.stat().st_mtime_ns >= mtime_psd):
         imagem = Image.open(arquivo).convert("RGBA")
         if imagem.height == altura:
             return imagem
+    if caminho_psd is None or not caminho_psd.is_file():
+        return None
 
     from psd_tools import PSDImage
 
@@ -1355,12 +1418,10 @@ def gerar_presets_curso(tamanho, cursos_rgb):
     try:
         config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         caminho_psd = Path(config["psd_dir"]) / PSD_POR_TAMANHO[tamanho][0]
-    except (OSError, KeyError, json.JSONDecodeError) as erro:
-        raise FileNotFoundError("Configuração dos PSDs indisponível.") from erro
-    if not caminho_psd.is_file():
-        raise FileNotFoundError("PSD não encontrado: " + str(caminho_psd))
+        mtime_psd = caminho_psd.stat().st_mtime_ns if caminho_psd.is_file() else None
+    except (OSError, KeyError, json.JSONDecodeError):
+        caminho_psd, mtime_psd = None, None
 
-    mtime_psd = caminho_psd.stat().st_mtime_ns
     faltantes = {}
     resultado = {}
     diretorio = PREVIA_CAPAS_DIR / "presets"
@@ -1381,7 +1442,7 @@ def gerar_presets_curso(tamanho, cursos_rgb):
         try:
             info = json.loads(arquivos[1].read_text(encoding="utf-8"))
             cache_valido = (
-                info.get("psd_mtime_ns") == mtime_psd
+                (mtime_psd is None or info.get("psd_mtime_ns") == mtime_psd)
                 and info.get("versao") == VERSAO_PRESET_CURSO
                 and info.get("rgb") == (list(cor) if cor is not None else None)
                 and all(arquivo.is_file() for arquivo in arquivos + base_arquivos)
@@ -1394,6 +1455,8 @@ def gerar_presets_curso(tamanho, cursos_rgb):
             faltantes[simbolo] = cor
 
     if faltantes:
+        if caminho_psd is None or not caminho_psd.is_file():
+            raise FileNotFoundError("PSD não encontrado: " + str(caminho_psd or tamanho))
         from psd_tools import PSDImage
 
         psd = PSDImage.open(caminho_psd)
@@ -1445,9 +1508,9 @@ def preset_em_cache(tamanho, simbolo, rgb):
     try:
         config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         caminho_psd = Path(config["psd_dir"]) / PSD_POR_TAMANHO[tamanho][0]
-        mtime_psd = caminho_psd.stat().st_mtime_ns
+        mtime_psd = caminho_psd.stat().st_mtime_ns if caminho_psd.is_file() else None
     except (OSError, KeyError, json.JSONDecodeError):
-        return False
+        mtime_psd = None
     cor = tuple(rgb) if rgb is not None else None
     slug = re.sub(r"[^a-z0-9_-]+", "_", _chave_brasao(simbolo)).strip("_")
     cor_slug = "semcor" if cor is None else "%02x%02x%02x" % cor
@@ -1462,7 +1525,7 @@ def preset_em_cache(tamanho, simbolo, rgb):
     if tamanho in VERSO_SEPARADO:
         arquivos.append(_arquivo_verso_preset(tamanho, slug, cor))
     return (
-        info.get("psd_mtime_ns") == mtime_psd
+        (mtime_psd is None or info.get("psd_mtime_ns") == mtime_psd)
         and info.get("versao") == VERSAO_PRESET_CURSO
         and info.get("rgb") == (list(cor) if cor is not None else None)
         and all(a.is_file() for a in arquivos)

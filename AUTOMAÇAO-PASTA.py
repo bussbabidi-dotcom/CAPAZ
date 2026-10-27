@@ -9,6 +9,9 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
+import concurrent.futures
+import hashlib
 import time
 import uuid
 from pathlib import Path
@@ -6614,6 +6617,47 @@ RESULTADO_AUTOMACAO;
 # EXECUTAR PHOTOSHOP
 # ============================================================
 
+CACHE_PSD_DIR = Path(tempfile.gettempdir()) / "capaz_psd_cache"
+_PHOTOSHOP_APP = None
+
+
+def obter_photoshop_app():
+    """Reutiliza a instância COM do Photoshop evitando overhead de Dispatch repetido."""
+    global _PHOTOSHOP_APP
+    if _PHOTOSHOP_APP is not None:
+        try:
+            _ = _PHOTOSHOP_APP.Visible
+            return _PHOTOSHOP_APP
+        except Exception:
+            _PHOTOSHOP_APP = None
+    _PHOTOSHOP_APP = win32com.client.Dispatch("Photoshop.Application")
+    _PHOTOSHOP_APP.Visible = True
+    return _PHOTOSHOP_APP
+
+
+def obter_template_psd_cache(template_original):
+    """Mantém cópia local persistente do PSD validada por (mtime_ns, size) para eliminar cópias repetidas de centenas de MB."""
+    template_original = Path(template_original)
+    st = template_original.stat()
+    chave_hash = hashlib.sha1(os.path.normcase(str(template_original.resolve())).encode("utf-8")).hexdigest()[:12]
+    CACHE_PSD_DIR.mkdir(parents=True, exist_ok=True)
+    meta_file = CACHE_PSD_DIR / f"template_{chave_hash}.json"
+    cached_psd = CACHE_PSD_DIR / f"template_{chave_hash}{template_original.suffix.lower()}"
+    assinatura = {"mtime_ns": st.st_mtime_ns, "size": st.st_size, "origem": str(template_original)}
+    if cached_psd.is_file() and meta_file.is_file():
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            if meta.get("mtime_ns") == st.st_mtime_ns and meta.get("size") == st.st_size and cached_psd.stat().st_size == st.st_size:
+                print("  [CACHE PSD HIT] Usando template local em cache:", cached_psd.name)
+                return cached_psd
+        except Exception:
+            pass
+    print("  [CACHE PSD] Atualizando cache local do PSD:", template_original.name)
+    copiar_com_retry(template_original, cached_psd, "PSD TEMPLATE (cache persistente local)")
+    meta_file.write_text(json.dumps(assinatura, ensure_ascii=False), encoding="utf-8")
+    return cached_psd
+
+
 def executar_photoshop(job):
 
     print()
@@ -6674,13 +6718,7 @@ def executar_photoshop(job):
             pasta_destino
         )
 
-    photoshop = (
-        win32com.client.Dispatch(
-            "Photoshop.Application"
-        )
-    )
-
-    photoshop.Visible = True
+    photoshop = obter_photoshop_app()
 
     # ========================================================
     # PASTA TEMPORÁRIA LOCAL
@@ -6727,18 +6765,14 @@ def executar_photoshop(job):
         # COPIAR PSD
         # ----------------------------------------------------
 
-        copiar_com_retry(
-            template_original,
-            template_local,
-            "PSD TEMPLATE (cópia para temporário local)"
-        )
+        template_cached = obter_template_psd_cache(template_original)
 
         job_exec = dict(
             job
         )
 
         job_exec["template"] = str(
-            template_local
+            template_cached
         )
 
         # ----------------------------------------------------
@@ -7110,7 +7144,8 @@ def _fechar_documentos_temp(photoshop, pasta_temp):
             except Exception:
                 continue
 
-            if caminho.startswith(prefixo):
+            prefixo_cache = os.path.normcase(str(CACHE_PSD_DIR))
+            if caminho.startswith(prefixo) or caminho.startswith(prefixo_cache):
                 try:
                     # 2 = psDoNotSaveChanges
                     doc.Close(2)

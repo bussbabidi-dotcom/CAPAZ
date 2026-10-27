@@ -2222,11 +2222,14 @@ class AbaFotos:
                         molde = cfg["moldes"][tamanho_foto]
                         caixa = rf.caixa_manual(arquivo, tamanho_foto, imagem.size, molde)
                         if caixa is None:
-                            rosto = rf.detectar_rosto(imagem)
-                            caixa = rf.calcular_recorte(
-                                imagem.size, rosto, molde,
-                                calibracao.get(tamanho_foto, rf.CALIBRACAO_PADRAO),
-                            )
+                            if rf.no_molde(imagem.size, molde):
+                                caixa = rf.ajustar_caixa((0, 0, imagem.width, imagem.height), imagem.size, molde)
+                            else:
+                                rosto = rf.detectar_rosto_cache(origem_foto, imagem) if hasattr(rf, "detectar_rosto_cache") else rf.detectar_rosto(imagem)
+                                caixa = (
+                                    rf.calcular_recorte(imagem.size, rosto, molde, calibracao.get(tamanho_foto, rf.CALIBRACAO_PADRAO))
+                                    if rosto else rf.ajustar_caixa((0, 0, imagem.width, imagem.height), imagem.size, molde)
+                                )
                         foto_recortada = imagem.crop(tuple(round(c) for c in caixa))
                         if preset:
                             capa = rf.montar_previa_preset(foto_recortada, preset, amostra["nome"])
@@ -2541,14 +2544,19 @@ class AbaFotos:
     @staticmethod
     def _recorte_revisao(rf, arquivo, tamanho_foto, cfg, calibracao):
 
-        imagem, _, _ = rf.abrir_foto(rf.fonte_original(arquivo, cfg))
+        origem_foto = rf.fonte_original(arquivo, cfg)
+        imagem, _, _ = rf.abrir_foto(origem_foto)
         molde = cfg["moldes"][tamanho_foto]
         caixa = rf.caixa_manual(arquivo, tamanho_foto, imagem.size, molde)
         if caixa is None:
-            caixa = rf.calcular_recorte(
-                imagem.size, rf.detectar_rosto(imagem), molde,
-                calibracao.get(tamanho_foto, rf.CALIBRACAO_PADRAO),
-            )
+            if rf.no_molde(imagem.size, molde):
+                caixa = rf.ajustar_caixa((0, 0, imagem.width, imagem.height), imagem.size, molde)
+            else:
+                rosto = rf.detectar_rosto_cache(origem_foto, imagem) if hasattr(rf, "detectar_rosto_cache") else rf.detectar_rosto(imagem)
+                caixa = (
+                    rf.calcular_recorte(imagem.size, rosto, molde, calibracao.get(tamanho_foto, rf.CALIBRACAO_PADRAO))
+                    if rosto else rf.ajustar_caixa((0, 0, imagem.width, imagem.height), imagem.size, molde)
+                )
         recortada = imagem.crop(tuple(round(c) for c in caixa)).convert("RGB")
         recortada.thumbnail((1400, 1400), Image.LANCZOS)
         return recortada
@@ -3037,7 +3045,7 @@ class AbaFotos:
                 fator = min(1.0, LADO_EDITOR / max(img.size))
                 if fator < 1.0:
                     reduzida = reduzida.resize((round(img.width * fator), round(img.height * fator)), Image.BILINEAR)
-                rosto = rf.detectar_rosto(img)
+                rosto = rf.detectar_rosto_cache(origem, img) if hasattr(rf, "detectar_rosto_cache") else rf.detectar_rosto(img)
                 self.root.after(0, self._foto_aberta, arquivo, origem, fonte, reduzida, fator, rosto, tam, calib, None)
             except Exception as e:
                 self.root.after(0, self._foto_aberta, arquivo, None, None, None, 1.0, None, tam, calib, e)
@@ -3277,10 +3285,13 @@ class AbaFotos:
 
     def _soltar(self, e):
 
-        if self._arrasto and self._arrasto["inicio"] != self.caixa:
+        mudou = bool(self._arrasto and self._arrasto["inicio"] != self.caixa)
+        if mudou:
             self.historico.append(self._arrasto["inicio"])
             del self.historico[:-50]
         self._arrasto = None
+        if mudou:
+            self._agendar_previa()
 
     def _rodinha(self, e):
         self._zoom_relativo(0.95 if e.delta > 0 else 1.05)
@@ -3352,7 +3363,8 @@ class AbaFotos:
 
         if self._previa_pendente:
             self.root.after_cancel(self._previa_pendente)
-        self._previa_pendente = self.root.after(80, self._atualizar_previa)
+        atraso = 24 if getattr(self, "_arrasto", None) else 75
+        self._previa_pendente = self.root.after(atraso, self._atualizar_previa)
 
     def _previa_capa(self, tam):
 
@@ -3386,8 +3398,9 @@ class AbaFotos:
         caixa_red = tuple(round(c * f) for c in self.caixa)
         mw, mh = self._molde()
         escala = min(1.0, 1400 / max(mw, mh))
+        filtro_interp = Image.BILINEAR if getattr(self, "_arrasto", None) else Image.LANCZOS
         recortada = self.reduzida.crop(caixa_red).resize(
-            (max(1, round(mw * escala)), max(1, round(mh * escala))), Image.LANCZOS)
+            (max(1, round(mw * escala)), max(1, round(mh * escala))), filtro_interp)
 
         imagem = recortada
         if self.modo_previa.get() == "capa":
