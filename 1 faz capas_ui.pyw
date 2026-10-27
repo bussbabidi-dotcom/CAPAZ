@@ -612,14 +612,13 @@ class JanelaCapas:
         abas.pack(fill="both", expand=True)
 
         principal = ttk.Frame(abas, padding=16)
-        abas.add(principal, text="Capas")
+        abas.add(principal, text="Capas (Lista e Gerar)")
 
         quadro_fotos = ttk.Frame(abas, padding=12)
-        abas.add(quadro_fotos, text="Fotos (recorte)")
         self.quadro_fotos = quadro_fotos
 
-        quadro_revisao = ttk.Frame(abas, padding=16)
-        abas.add(quadro_revisao, text="Revisão")
+        quadro_revisao = ttk.Frame(abas, padding=14)
+        abas.add(quadro_revisao, text="Revisão e Recorte")
         self.aba_fotos = AbaFotos(self, quadro_fotos, quadro_revisao)
 
         self.abas = abas
@@ -638,10 +637,55 @@ class JanelaCapas:
         principal.rowconfigure(1, weight=1)
         principal.rowconfigure(4, weight=1)
 
-        # ---------------- Origem ----------------
+        # ---------------- Barra Rápida (1 Clique Sem Planilha) ----------------
 
-        origem = ttk.Frame(principal)
-        origem.grid(row=0, column=0, sticky="we")
+        topo_rapido = ttk.Frame(principal)
+        topo_rapido.grid(row=0, column=0, sticky="we")
+
+        self.botao_ler_fotos = ttk.Button(
+            topo_rapido, text="Carregar Fotos da Pasta (1 Clique)", style="Primario.TButton",
+            command=self.ler_fotos,
+        )
+        self.botao_ler_fotos.pack(side="left", padx=(0, 12))
+
+        ttk.Label(topo_rapido, text="Curso p/ todos:").pack(side="left", padx=(4, 4))
+        self.campo_curso_todos = ttk.Combobox(
+            topo_rapido, textvariable=self.curso_todos, width=24, postcommand=self._listar_cursos_todos
+        )
+        self.campo_curso_todos.pack(side="left")
+        self.campo_curso_todos.bind("<Return>", lambda e: self._aplicar_curso_todos())
+        self.campo_curso_todos.bind("<<ComboboxSelected>>", lambda e: self._aplicar_curso_todos())
+        ttk.Button(
+            topo_rapido, text="Aplicar", command=self._aplicar_curso_todos
+        ).pack(side="left", padx=(4, 12))
+
+        ttk.Label(topo_rapido, text="Plano p/ todos:").pack(side="left", padx=(4, 4))
+        self.campo_plano_todos = ttk.Combobox(
+            topo_rapido, textvariable=self.plano_todos, width=22, postcommand=self._listar_planos)
+        self.campo_plano_todos.pack(side="left")
+        self.campo_plano_todos.bind("<Return>", lambda e: self._aplicar_plano_todos())
+        self.campo_plano_todos.bind("<<ComboboxSelected>>", lambda e: self._aplicar_plano_todos())
+        ttk.Button(
+            topo_rapido, text="Aplicar", command=self._aplicar_plano_todos
+        ).pack(side="left", padx=(4, 12))
+
+        ttk.Button(
+            topo_rapido, text="Ir para Revisão e Recorte ->",
+            command=lambda: self.abas.select(self.quadro_revisao),
+        ).pack(side="left", padx=(4, 0))
+
+        self.mostrar_avancado = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            topo_rapido, text="Usar planilha / Opções avançadas",
+            variable=self.mostrar_avancado, command=self._alternar_modo_avancado,
+        ).pack(side="right")
+
+        # ---------------- Painel Avançado (Oculto por padrão para não poluir) ----------------
+
+        self.quadro_avancado = ttk.Frame(principal)
+
+        origem = ttk.Frame(self.quadro_avancado)
+        origem.pack(fill="x", pady=(6, 4))
 
         ttk.Radiobutton(
             origem, text="Sem planilha (usar as fotos da pasta)", value="fotos",
@@ -658,7 +702,7 @@ class JanelaCapas:
             variable=self.origem, command=self._escolheu_origem,
         ).pack(side="left", padx=(16, 4))
 
-        self.campo_planilha = ttk.Entry(origem, textvariable=self.planilha, width=60)
+        self.campo_planilha = ttk.Entry(origem, textvariable=self.planilha, width=50)
         self.campo_planilha.pack(side="left", fill="x", expand=True, padx=4)
 
         self.botao_planilha = ttk.Button(
@@ -666,34 +710,34 @@ class JanelaCapas:
         )
         self.botao_planilha.pack(side="left")
 
-        # ---------------- Colagem + tabela ----------------
+        # ---------------- Tabela limpa de Alunos ----------------
 
         colagem = ttk.LabelFrame(
             principal,
-            text="Alunos  (copie do Excel as colunas NOME | CURSO | PLANO e cole aqui)",
+            text="Lista de Capas (duplo-clique em um aluno para abrir na Revisão e Recorte)",
             padding=6,
         )
         colagem.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
-        colagem.columnconfigure(0, weight=1)
-        colagem.columnconfigure(1, weight=2)
+        colagem.columnconfigure(0, weight=0)
+        colagem.columnconfigure(1, weight=1)
         colagem.rowconfigure(0, weight=1)
 
-        self.texto_colagem = tk.Text(colagem, height=10, wrap="none", undo=True)
-        self.texto_colagem.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.texto_colagem = tk.Text(colagem, height=10, width=38, wrap="none", undo=True)
         self.texto_colagem.bind("<<Paste>>", lambda e: self.root.after(50, self._colou_texto))
 
         colunas = ("linha", "nome", "curso", "plano")
-        self.tabela = ttk.Treeview(colagem, columns=colunas, show="headings", height=10)
+        self.tabela = ttk.Treeview(colagem, columns=colunas, show="headings", height=12)
         for col, titulo, largura in (
-            ("linha", "Linha", 50),
-            ("nome", "Nome", 220),
-            ("curso", "Curso", 160),
-            ("plano", "Plano", 170),
+            ("linha", "#", 46),
+            ("nome", "Nome do Formando", 280),
+            ("curso", "Curso (definido na prévia ou lista)", 220),
+            ("plano", "Plano / Tamanho da Capa", 200),
         ):
             self.tabela.heading(col, text=titulo)
             self.tabela.column(col, width=largura, anchor="w", stretch=(col != "linha"))
-        self.tabela.tag_configure("aviso", foreground=COR_VERMELHO)
+        self.tabela.tag_configure("aviso", foreground=COR_AMARELO)
         self.tabela.grid(row=0, column=1, sticky="nsew")
+        self.tabela.bind("<Double-1>", self._duplo_clique_tabela)
 
         barra = ttk.Scrollbar(colagem, orient="vertical", command=self.tabela.yview)
         barra.grid(row=0, column=2, sticky="ns")
@@ -703,143 +747,110 @@ class JanelaCapas:
         botoes_colagem.grid(row=1, column=0, columnspan=3, sticky="we", pady=(6, 0))
 
         self.botao_colar = ttk.Button(
-            botoes_colagem, text="Colar da área de transferência",
+            botoes_colagem, text="Colar do Excel",
             command=self._colar_clipboard,
         )
         self.botao_colar.pack(side="left")
 
         self.botao_carregar = ttk.Button(
-            botoes_colagem, text="Carregar", command=self.carregar
+            botoes_colagem, text="Atualizar tabela", command=self.carregar
         )
         self.botao_carregar.pack(side="left", padx=6)
 
         self.botao_limpar = ttk.Button(
-            botoes_colagem, text="Limpar", command=self._limpar
+            botoes_colagem, text="Limpar lista", command=self._limpar
         )
         self.botao_limpar.pack(side="left")
 
-        self.botao_ler_fotos = ttk.Button(
-            botoes_colagem, text="Ler fotos da pasta", command=self.ler_fotos
-        )
-        self.botao_ler_fotos.pack(side="left", padx=(16, 4))
-
-        ttk.Label(botoes_colagem, text="Curso p/ todos:").pack(side="left", padx=(6, 2))
-        campo_curso = ttk.Entry(botoes_colagem, textvariable=self.curso_todos, width=22)
-        campo_curso.pack(side="left")
-        campo_curso.bind("<Return>", lambda e: self._aplicar_curso_todos())
-        ttk.Button(
-            botoes_colagem, text="Aplicar", command=self._aplicar_curso_todos
-        ).pack(side="left", padx=(4, 0))
-
-        ttk.Label(botoes_colagem, text="Plano p/ todos:").pack(side="left", padx=(16, 2))
-        self.campo_plano_todos = ttk.Combobox(
-            botoes_colagem, textvariable=self.plano_todos, width=24, postcommand=self._listar_planos)
-        self.campo_plano_todos.pack(side="left")
-        self.campo_plano_todos.bind("<Return>", lambda e: self._aplicar_plano_todos())
-        self.campo_plano_todos.bind("<<ComboboxSelected>>", lambda e: self._aplicar_plano_todos())
-        ttk.Button(
-            botoes_colagem, text="Aplicar", command=self._aplicar_plano_todos
-        ).pack(side="left", padx=(4, 0))
+        ttk.Label(botoes_colagem, text="Filtrar aluno:").pack(side="left", padx=(18, 4))
+        ttk.Entry(botoes_colagem, textvariable=self.aluno, width=22).pack(side="left")
 
         self.total_alunos = ttk.Label(botoes_colagem, text="")
         self.total_alunos.pack(side="right")
 
-        # ---------------- Filtros e opções ----------------
+        # ---------------- Filtros avançados (ocultos por padrão) ----------------
 
-        filtros = ttk.LabelFrame(principal, text="Filtros e opções", padding=6)
-        filtros.grid(row=2, column=0, sticky="we", pady=(8, 0))
+        filtros = ttk.LabelFrame(self.quadro_avancado, text="Filtros avançados", padding=6)
+        filtros.pack(fill="x", pady=(4, 0))
 
-        ttk.Label(filtros, text="Aluno").grid(row=0, column=0, sticky="w")
-        ttk.Entry(filtros, textvariable=self.aluno, width=24).grid(row=0, column=1, sticky="w", padx=(4, 12))
+        ttk.Label(filtros, text="Plano").grid(row=0, column=0, sticky="w")
+        ttk.Entry(filtros, textvariable=self.plano, width=20).grid(row=0, column=1, sticky="w", padx=(4, 12))
 
-        ttk.Label(filtros, text="Plano").grid(row=0, column=2, sticky="w")
-        ttk.Entry(filtros, textvariable=self.plano, width=20).grid(row=0, column=3, sticky="w", padx=(4, 12))
+        ttk.Label(filtros, text="Linhas").grid(row=0, column=2, sticky="w")
+        ttk.Entry(filtros, textvariable=self.linhas, width=14).grid(row=0, column=3, sticky="w", padx=(4, 4))
 
-        ttk.Label(filtros, text="Linhas").grid(row=0, column=4, sticky="w")
-        ttk.Entry(filtros, textvariable=self.linhas, width=14).grid(row=0, column=5, sticky="w", padx=(4, 4))
-        ttk.Label(filtros, text="ex.: 10-20 ou 5,8,12", style="Dica.TLabel").grid(row=0, column=6, sticky="w")
-
-        ttk.Checkbutton(
-            filtros, text="Só quem deu erro na última vez", variable=self.so_erros
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
-
-        ttk.Checkbutton(
-            filtros, text="Refazer mesmo se a capa já existe", variable=self.refazer
-        ).grid(row=1, column=3, columnspan=2, sticky="w", pady=(6, 0))
-
-        ttk.Label(filtros, text="Berlim").grid(row=1, column=5, sticky="e", pady=(6, 0))
+        ttk.Label(filtros, text="Berlim").grid(row=0, column=4, sticky="e", padx=(12, 4))
         ttk.Combobox(
             filtros, textvariable=self.berlim, state="readonly", width=12,
             values=["Ambos", "Só 24x34", "Só 20x20"],
-        ).grid(row=1, column=6, sticky="w", pady=(6, 0))
+        ).grid(row=0, column=5, sticky="w")
 
-        ttk.Label(filtros, text="Salvar").grid(row=3, column=0, sticky="w", pady=(6, 0))
-        ttk.Combobox(
-            filtros, textvariable=self.tipo_saida, state="readonly", width=12, values=TIPOS_SAIDA,
-        ).grid(row=3, column=1, sticky="w", padx=(4, 12), pady=(6, 0))
+        ttk.Label(filtros, text="Lote").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(filtros, textvariable=self.lote, width=20).grid(row=1, column=1, sticky="w", padx=(4, 12), pady=(6, 0))
 
-        ttk.Label(filtros, text="Lote").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(filtros, textvariable=self.lote, width=24).grid(row=2, column=1, sticky="w", padx=(4, 12), pady=(6, 0))
-
-        ttk.Label(filtros, text="Status").grid(row=2, column=2, sticky="w", pady=(6, 0))
+        ttk.Label(filtros, text="Status").grid(row=1, column=2, sticky="w", pady=(6, 0))
         ttk.Entry(filtros, textvariable=self.status_filtro, width=20).grid(
-            row=2, column=3, sticky="w", padx=(4, 12), pady=(6, 0))
+            row=1, column=3, sticky="w", padx=(4, 12), pady=(6, 0))
 
-        ttk.Label(
-            filtros, text="Lote e Status: só com planilha (ex.: lote 16 ou 15,16; status Aprovado)",
-            style="Dica.TLabel",
-        ).grid(row=2, column=4, columnspan=3, sticky="w", pady=(6, 0))
-
-        # ---------------- Ações ----------------
+        # ---------------- Ações Principais (Limpas e Diretas) ----------------
 
         acoes = ttk.Frame(principal)
-        acoes.grid(row=3, column=0, sticky="we", pady=(8, 0))
+        acoes.grid(row=3, column=0, sticky="we", pady=(10, 0))
+
+        self.botao_gerar = ttk.Button(
+            acoes, text="GERAR CAPAS NO PHOTOSHOP", style="Primario.TButton",
+            command=lambda: self.executar(False),
+        )
+        self.botao_gerar.pack(side="left", padx=(0, 8))
+
+        self.botao_recorte = ttk.Button(
+            acoes, text="Recortar todas as fotos", command=lambda: self.recortar(False)
+        )
+        self.botao_recorte.pack(side="left", padx=(0, 8))
 
         self.botao_validar = ttk.Button(
             acoes, text="Validar (sem Photoshop)", command=lambda: self.executar(True)
         )
-        self.botao_validar.pack(side="left")
-
-        self.botao_gerar = ttk.Button(
-            acoes, text="Gerar capas", style="Primario.TButton", command=lambda: self.executar(False)
-        )
-        self.botao_gerar.pack(side="left", padx=6)
+        self.botao_validar.pack(side="left", padx=(0, 8))
 
         self.botao_parar = ttk.Button(acoes, text="Parar", command=self.parar, state="disabled")
-        self.botao_parar.pack(side="left", padx=(0, 6))
+        self.botao_parar.pack(side="left", padx=(0, 12))
+
+        ttk.Label(acoes, text="Salvar:").pack(side="left", padx=(4, 4))
+        ttk.Combobox(
+            acoes, textvariable=self.tipo_saida, state="readonly", width=10, values=TIPOS_SAIDA,
+        ).pack(side="left", padx=(0, 12))
+
+        ttk.Checkbutton(
+            acoes, text="Refazer existentes", variable=self.refazer
+        ).pack(side="left", padx=(0, 10))
+
+        ttk.Checkbutton(
+            acoes, text="Só erros", variable=self.so_erros
+        ).pack(side="left", padx=(0, 10))
 
         self.botao_relatorio = ttk.Button(
-            acoes, text="Abrir relatório", command=self._abrir_relatorio, state="disabled"
+            acoes, text="Relatório", command=self._abrir_relatorio, state="disabled"
         )
         self.botao_relatorio.pack(side="left")
 
-        ttk.Separator(acoes, orient="vertical").pack(side="left", fill="y", padx=10)
-
         self.botao_recorte_simular = ttk.Button(
-            acoes, text="Recortar fotos (simular)", command=lambda: self.recortar(True)
+            self.quadro_avancado, text="Recortar fotos (simular)", command=lambda: self.recortar(True)
         )
-        self.botao_recorte_simular.pack(side="left")
-
-        self.botao_recorte = ttk.Button(
-            acoes, text="Recortar fotos", command=lambda: self.recortar(False)
-        )
-        self.botao_recorte.pack(side="left", padx=6)
-
         self.botao_miniaturas = ttk.Button(
-            acoes, text="Miniaturas", command=self._abrir_miniaturas
+            self.quadro_avancado, text="Miniaturas", command=self._abrir_miniaturas
         )
-        self.botao_miniaturas.pack(side="left")
 
         ttk.Label(acoes, textvariable=self.status).pack(side="left", padx=12)
 
         # ---------------- Saída ----------------
 
-        saida = ttk.LabelFrame(principal, text="Saída", padding=6)
+        saida = ttk.LabelFrame(principal, text="Andamento / Saída", padding=6)
         saida.grid(row=4, column=0, sticky="nsew", pady=(8, 0))
         saida.columnconfigure(0, weight=1)
         saida.rowconfigure(0, weight=1)
 
-        self.texto_saida = tk.Text(saida, height=12, wrap="word", state="disabled",
+        self.texto_saida = tk.Text(saida, height=9, wrap="word", state="disabled",
                                    background=COR_FUNDO, foreground=COR_TEXTO)
         self.texto_saida.grid(row=0, column=0, sticky="nsew")
 
@@ -849,28 +860,82 @@ class JanelaCapas:
 
         self._atualizar_origem()
 
+    def _alternar_modo_avancado(self):
+        if self.mostrar_avancado.get():
+            self.quadro_avancado.grid(row=2, column=0, sticky="we", pady=(6, 0))
+            self.texto_colagem.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        else:
+            self.quadro_avancado.grid_forget()
+            self.texto_colagem.grid_forget()
+
+    def _duplo_clique_tabela(self, evento=None):
+        sel = self.tabela.selection()
+        if not sel:
+            return
+        valores = self.tabela.item(sel[0], "values")
+        if len(valores) >= 2:
+            nome_aluno = valores[1]
+            self.abas.select(self.quadro_revisao)
+            if hasattr(self, "aba_fotos"):
+                self.aba_fotos.selecionar_aluno_por_nome(nome_aluno)
+
     def _aba_principal_mudou(self, evento=None):
 
         if self.abas.select() == str(self.quadro_revisao):
             self.aba_fotos.abrir_revisao()
 
     # --------------------------------------------------------
-    # Colagem
+    # Colagem e Sincronização Automática com a Revisão
     # --------------------------------------------------------
 
     def _carregar_ultima_colagem(self):
+        """Inicia direto lendo as fotos da pasta (sem precisar de planilha)."""
+        self.origem.set("fotos")
+        self._atualizar_origem()
+        self.root.after(250, self.ler_fotos)
 
-        try:
-            if ULTIMA_COLAGEM.is_file():
-                texto = ULTIMA_COLAGEM.read_text(encoding="utf-8")
-                if texto.strip():
-                    self.texto_colagem.insert("1.0", texto)
-                    self.origem.set("colar")
-                    self.carregar()
-                    return
-        except Exception:
-            pass
-        self.root.after(300, self.ler_fotos)
+    def sincronizar_curso_aluno(self, nome_aluno, curso):
+        """Grava automaticamente na lista principal o curso definido na prévia/revisão."""
+        if not nome_aluno:
+            return
+        alvo = chave(nome_aluno)
+        alunos = interpretar_colagem(self.texto_colagem.get("1.0", "end"))
+        alterou = False
+        for a in alunos:
+            if chave(a.get("nome", "")) == alvo:
+                if a.get("curso") != curso:
+                    a["curso"] = curso
+                    alterou = True
+        if alterou:
+            self._preencher_texto(alunos)
+            try:
+                PASTA_TEMP.mkdir(parents=True, exist_ok=True)
+                ULTIMA_COLAGEM.write_text(self.texto_colagem.get("1.0", "end"), encoding="utf-8")
+            except Exception:
+                pass
+
+    def sincronizar_cursos_fotos(self, mapa_cursos_manuais):
+        """Sincroniza todos os cursos salvos por foto para a tabela principal de Capas."""
+        if not mapa_cursos_manuais:
+            return
+        rf = modulo_recorte()
+        por_nome = {}
+        for cam, cur in mapa_cursos_manuais.items():
+            if cur:
+                nm = rf.nome_do_aluno(Path(cam))
+                if nm:
+                    por_nome[chave(nm)] = cur
+        if not por_nome:
+            return
+        alunos = interpretar_colagem(self.texto_colagem.get("1.0", "end"))
+        alterou = False
+        for a in alunos:
+            ch = chave(a.get("nome", ""))
+            if ch in por_nome and a.get("curso") != por_nome[ch]:
+                a["curso"] = por_nome[ch]
+                alterou = True
+        if alterou:
+            self._preencher_texto(alunos)
 
     def _colar_clipboard(self):
 
@@ -944,7 +1009,11 @@ class JanelaCapas:
         self.plano_todos_aplicado = ""
         self._preencher_texto(alunos, self.curso_todos.get().strip())
 
-        texto = str(len(alunos)) + " capa(s) montada(s) pelas fotos da pasta (sem planilha)."
+        com_curso = sum(1 for a in self.alunos if a.get("curso"))
+        texto = (
+            str(len(alunos)) + " capa(s) carregada(s) direto das fotos ("
+            + str(com_curso) + " já com curso definido)."
+        )
         if erro:
             texto += "  " + erro
         self.status.set(texto)
@@ -962,16 +1031,33 @@ class JanelaCapas:
         self.texto_colagem.configure(state=estado)
         self.carregar()
 
+    def _listar_cursos_todos(self):
+        try:
+            automacao = modulo_automacao()
+            cursos = sorted(automacao.CURSOS.keys())
+        except Exception:
+            cursos = []
+        self.campo_curso_todos.configure(values=cursos)
+
     def _aplicar_curso_todos(self):
 
         if self.origem.get() == "arquivo":
             return
         alunos = self.carregar()
         curso = self.curso_todos.get().strip()
+        if not curso:
+            return
         for a in alunos:
             a["curso"] = curso
+        if hasattr(self, "aba_fotos") and self.aba_fotos.fotos:
+            for foto in self.aba_fotos.fotos:
+                self.aba_fotos.cursos_manuais[chave_caminho_foto(foto)] = curso
+            try:
+                self.aba_fotos._gravar_cursos_foto()
+            except Exception:
+                pass
         self._preencher_texto(alunos)
-        self.status.set("Curso aplicado em " + str(len(alunos)) + " aluno(s).")
+        self.status.set("Curso " + curso + " aplicado e gravado em " + str(len(alunos)) + " aluno(s).")
 
     def _listar_planos(self):
 
@@ -1018,21 +1104,21 @@ class JanelaCapas:
 
         self.tabela.delete(*self.tabela.get_children())
 
-        avisos = 0
+        sem_curso = 0
 
         for aluno in self.alunos:
-            incompleto = not aluno["nome"] or not aluno["plano"]
-            if incompleto:
-                avisos += 1
+            incompleto = not aluno["nome"] or not aluno["plano"] or not aluno.get("curso")
+            if not aluno.get("curso"):
+                sem_curso += 1
             self.tabela.insert(
                 "", "end",
-                values=(aluno["linha"], aluno["nome"], aluno["curso"], aluno["plano"]),
+                values=(aluno["linha"], aluno["nome"], aluno.get("curso") or "(definir na Revisão)", aluno["plano"]),
                 tags=("aviso",) if incompleto else (),
             )
 
-        texto_total = "Total: " + str(len(self.alunos)) + " aluno(s)"
-        if avisos:
-            texto_total += "  |  " + str(avisos) + " sem nome ou plano (em vermelho)"
+        texto_total = "Total: " + str(len(self.alunos)) + " capa(s)"
+        if sem_curso:
+            texto_total += "  |  " + str(sem_curso) + " aguardando curso (defina na aba Revisão e Recorte)"
         self.total_alunos.configure(text=texto_total)
         if hasattr(self, "aba_fotos"):
             self.aba_fotos.agendar_revisao()
@@ -1110,6 +1196,8 @@ class JanelaCapas:
 
         if self.origem.get() in ("colar", "fotos"):
 
+            if hasattr(self, "aba_fotos") and self.aba_fotos.cursos_manuais:
+                self.sincronizar_cursos_fotos(self.aba_fotos.cursos_manuais)
             alunos = self.carregar()
 
             if not any(a["nome"] for a in alunos):
@@ -1117,15 +1205,14 @@ class JanelaCapas:
                     messagebox.showwarning(
                         "Automação de Capas",
                         "Nenhuma foto encontrada na pasta.\n"
-                        "Confira a pasta de fotos na aba \"Pastas e links\" e clique em \"Ler fotos da pasta\".",
+                        "Confira a pasta de fotos na aba \"Pastas e links\" e clique em \"Carregar Fotos da Pasta\".",
                     )
                 else:
                     messagebox.showwarning("Automação de Capas", "Cole pelo menos um aluno antes de rodar.")
                 return None
 
             PASTA_TEMP.mkdir(parents=True, exist_ok=True)
-            if self.origem.get() == "colar":
-                ULTIMA_COLAGEM.write_text(self.texto_colagem.get("1.0", "end"), encoding="utf-8")
+            ULTIMA_COLAGEM.write_text(self.texto_colagem.get("1.0", "end"), encoding="utf-8")
 
             try:
                 gravar_planilha_temporaria(alunos)
@@ -1658,107 +1745,12 @@ class AbaFotos:
         self.total = ttk.Label(esquerda, text="", style="Dica.TLabel")
         self.total.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        # ---------------- Editor ----------------
-
-        centro = ttk.LabelFrame(
-            q, text="Corte  (arraste a caixa, use os cantos ou a rodinha para o tamanho, setas para ajuste fino)",
-            padding=6,
-        )
-        centro.grid(row=0, column=1, sticky="nsew", padx=6)
-        centro.columnconfigure(0, weight=1)
-        centro.rowconfigure(0, weight=1)
-
-        self.tela = tk.Canvas(centro, background=COR_FUNDO, highlightthickness=0,
-                              cursor="fleur")
-        self.tela.grid(row=0, column=0, sticky="nsew")
-        self.tela.bind("<Configure>", lambda e: self._desenhar())
-        self.tela.bind("<ButtonPress-1>", self._pressionar)
-        self.tela.bind("<B1-Motion>", self._arrastar)
-        self.tela.bind("<ButtonRelease-1>", self._soltar)
-        self.tela.bind("<MouseWheel>", self._rodinha)
-        for tecla, dx, dy in (("Left", -1, 0), ("Right", 1, 0), ("Up", 0, -1), ("Down", 0, 1)):
-            self.tela.bind("<" + tecla + ">", lambda e, dx=dx, dy=dy: self._mover_teclado(dx, dy, e))
-        self.tela.bind("<plus>", lambda e: self._zoom_relativo(0.97))
-        self.tela.bind("<minus>", lambda e: self._zoom_relativo(1.03))
-        self.tela.bind("<Control-z>", lambda e: self.desfazer())
-
-        ferramentas = ttk.Frame(centro)
-        ferramentas.grid(row=1, column=0, sticky="we", pady=(6, 0))
-        self.botoes_editor = []
-        for texto, comando in (
-            ("Auto (rosto)", self.auto_rosto),
-            ("Centralizar rosto", self.centralizar_rosto),
-            ("Desfazer", self.desfazer),
-            ("Voltar ao automático", self.voltar_automatico),
-        ):
-            b = ttk.Button(ferramentas, text=texto, command=comando)
-            b.pack(side="left", padx=(0, 4))
-            self.botoes_editor.append(b)
-        ttk.Label(ferramentas, text="Tamanho do corte").pack(side="left", padx=(12, 4))
-        self.controle_zoom = ttk.Scale(ferramentas, from_=15, to=100, variable=self.zoom,
-                                       orient="horizontal", length=180)
-        self.controle_zoom.pack(side="left")
-        for evento in ("<B1-Motion>", "<ButtonRelease-1>"):
-            self.controle_zoom.bind(evento, lambda e: self.root.after_idle(self._zoom_escala, self.zoom.get()), add="+")
-
-        ttk.Label(centro, textvariable=self.status, style="Dica.TLabel").grid(row=2, column=0, sticky="w", pady=(4, 0))
-
-        # ---------------- Prévia e tamanho ----------------
-
-        direita = ttk.Frame(q)
-        direita.grid(row=0, column=2, sticky="nse")
-
-        previa = ttk.LabelFrame(direita, text="Prévia do resultado", padding=6)
-        previa.pack(fill="x")
-        modos = ttk.Frame(previa)
-        modos.pack(fill="x")
-        ttk.Radiobutton(modos, text="Na capa", value="capa", variable=self.modo_previa,
-                        command=self._agendar_previa).pack(side="left")
-        ttk.Radiobutton(modos, text="Foto final", value="foto", variable=self.modo_previa,
-                        command=self._agendar_previa).pack(side="left", padx=8)
-        self.combo_capa = ttk.Combobox(modos, textvariable=self.capa_previa, width=7, state="readonly")
-        self.combo_capa.pack(side="left")
-        self.combo_capa.bind("<<ComboboxSelected>>", lambda e: (self._agendar_previa(), self._desenhar()))
-        self.botao_gerar_previa = ttk.Button(modos, text="Gerar prévia da capa", command=self.gerar_previa_capa)
-        self.botao_gerar_previa.pack(side="right")
-
+        # Widgets internos de compatibilidade mantidos no quadro oculto
+        previa = ttk.Frame(q)
+        self.combo_capa = ttk.Combobox(previa, textvariable=self.capa_previa, width=7, state="readonly")
+        self.botao_gerar_previa = ttk.Button(previa, text="Gerar prévia da capa", command=self.gerar_previa_capa)
         self._img_previa = ImageTk.PhotoImage(Image.new("RGB", (380, 380), COR_FUNDO))
         self.rotulo_previa = tk.Label(previa, background=COR_FUNDO, image=self._img_previa)
-        self.rotulo_previa.pack(pady=(6, 0))
-
-        tamanho = ttk.LabelFrame(direita, text="Tamanho da foto para o Photoshop", padding=6)
-        tamanho.pack(fill="x", pady=(8, 0))
-        ttk.Label(tamanho, text="Capa").grid(row=0, column=0, sticky="w")
-        combo = ttk.Combobox(tamanho, textvariable=self.tam, state="readonly", width=8, values=TAMANHOS)
-        combo.grid(row=0, column=1, sticky="w", padx=4)
-        combo.bind("<<ComboboxSelected>>", lambda e: self._trocar_tamanho())
-        ttk.Label(tamanho, text="Largura").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Entry(tamanho, textvariable=self.largura, width=8).grid(row=1, column=1, sticky="w", padx=4, pady=(4, 0))
-        ttk.Label(tamanho, text="Altura").grid(row=1, column=2, sticky="w", pady=(4, 0))
-        ttk.Entry(tamanho, textvariable=self.altura, width=8).grid(row=1, column=3, sticky="w", padx=4, pady=(4, 0))
-        ttk.Label(tamanho, text="px").grid(row=1, column=4, sticky="w", pady=(4, 0))
-        ttk.Button(tamanho, text="Gravar tamanho", command=self.gravar_tamanho).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Button(tamanho, text="Ler tamanho do PSD", command=self.ler_tamanho_psd).grid(
-            row=2, column=2, columnspan=3, sticky="w", pady=(6, 0))
-
-        ttk.Label(direita, textvariable=self.info, justify="left").pack(fill="x", pady=(8, 0))
-        tk.Label(direita, textvariable=self.alerta, foreground=COR_VERMELHO, background=COR_SUPERFICIE, justify="left",
-                 wraplength=380, anchor="w").pack(fill="x")
-
-        acoes = ttk.LabelFrame(direita, text="Gravar", padding=6)
-        acoes.pack(fill="x", pady=(8, 0))
-        self.botao_salvar = ttk.Button(acoes, text="Salvar esta foto", style="Primario.TButton", command=lambda: self.salvar(False))
-        self.botao_salvar.grid(row=0, column=0, sticky="we")
-        self.botao_salvar_prox = ttk.Button(acoes, text="Salvar e próxima", command=lambda: self.salvar(True))
-        self.botao_salvar_prox.grid(row=0, column=1, sticky="we", padx=4)
-        self.botao_restaurar = ttk.Button(acoes, text="Restaurar original", command=self.restaurar)
-        self.botao_restaurar.grid(row=1, column=0, columnspan=2, sticky="we", pady=(4, 0))
-        ttk.Label(
-            acoes, style="Dica.TLabel", wraplength=360, justify="left",
-            text="Grava na pasta FOTO no tamanho exato acima. O original fica em _ORIGINAIS "
-                 "e o corte é lembrado para o \"Recortar fotos\" em lote.",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         self._montar_revisao(self.quadro_revisao)
 
@@ -1767,19 +1759,17 @@ class AbaFotos:
         ttk = self.ttk
         tk = self.tk
         pagina.columnconfigure(0, weight=1)
-        pagina.rowconfigure(1, weight=1)
-
-        ttk.Label(
-            pagina,
-            text="Preset visual aproximado do curso. A composição usa a demonstração do PSD e não substitui a prova final do Photoshop.",
-        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        pagina.rowconfigure(0, weight=1)
 
         corpo = ttk.Frame(pagina)
-        corpo.grid(row=1, column=0, sticky="nsew")
+        corpo.grid(row=0, column=0, sticky="nsew")
         corpo.columnconfigure(0, weight=1)
-        corpo.columnconfigure(1, weight=2)
-        corpo.rowconfigure(0, weight=3)
-        corpo.rowconfigure(1, weight=2)
+        corpo.columnconfigure(1, weight=3)
+        corpo.columnconfigure(2, weight=0)
+        corpo.rowconfigure(0, weight=2)
+        corpo.rowconfigure(1, weight=3)
+
+        # ---------------- Coluna Esquerda: Cursos e Alunos ----------------
 
         quadro_lista = ttk.LabelFrame(corpo, text="Cursos encontrados", padding=6)
         quadro_lista.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
@@ -1788,15 +1778,15 @@ class AbaFotos:
 
         self.lista_revisao = ttk.Treeview(
             quadro_lista, columns=("curso", "quantidade", "cor", "nomes"), show="tree headings",
-            selectmode="browse", style="Review.Treeview",
+            selectmode="browse", style="Review.Treeview", height=5,
         )
         self.lista_revisao.heading("#0", text="Brasão")
-        self.lista_revisao.column("#0", width=68, anchor="center", stretch=False)
+        self.lista_revisao.column("#0", width=62, anchor="center", stretch=False)
         for coluna, titulo, largura in (
-            ("curso", "Curso", 170),
-            ("quantidade", "Fotos", 50),
-            ("cor", "Cor", 76),
-            ("nomes", "Nomes", 90),
+            ("curso", "Curso", 150),
+            ("quantidade", "Fotos", 46),
+            ("cor", "Cor", 70),
+            ("nomes", "Nomes", 80),
         ):
             self.lista_revisao.heading(coluna, text=titulo)
             self.lista_revisao.column(coluna, width=largura, anchor="w")
@@ -1806,7 +1796,7 @@ class AbaFotos:
         self.lista_revisao.configure(yscrollcommand=barra_revisao.set)
         self.lista_revisao.bind("<<TreeviewSelect>>", lambda e: self._selecionar_curso_revisao())
 
-        quadro_alunos = ttk.LabelFrame(corpo, text="Alunos do curso (nome na capa)", padding=6)
+        quadro_alunos = ttk.LabelFrame(corpo, text="Alunos (clique para ver a capa e recortar)", padding=6)
         quadro_alunos.grid(row=1, column=0, sticky="nsew", padx=(0, 8), pady=(8, 0))
         quadro_alunos.columnconfigure(0, weight=1)
         quadro_alunos.rowconfigure(1, weight=1)
@@ -1817,7 +1807,7 @@ class AbaFotos:
         self.lista_alunos = ttk.Treeview(
             quadro_alunos, columns=("nome", "capa", "situacao"), show="headings", selectmode="browse",
         )
-        for coluna, titulo, largura in (("nome", "Aluno", 230), ("capa", "Capa", 56), ("situacao", "Nome", 130)):
+        for coluna, titulo, largura in (("nome", "Aluno", 210), ("capa", "Capa", 54), ("situacao", "Nome", 110)):
             self.lista_alunos.heading(coluna, text=titulo)
             self.lista_alunos.column(coluna, width=largura, anchor="w")
         self.lista_alunos.tag_configure("nome_reduzido", background="#36352b", foreground=COR_AMARELO)
@@ -1829,24 +1819,43 @@ class AbaFotos:
         self.lista_alunos.configure(yscrollcommand=barra_alunos.set)
         self.lista_alunos.bind("<<TreeviewSelect>>", lambda e: self._selecionar_aluno_revisao())
 
-        painel = ttk.Frame(corpo, padding=(4, 0, 0, 0))
+        # ---------------- Coluna Central (GRANDE): Prévia da Capa + Definir Curso + Nome ----------------
+
+        painel = ttk.Frame(corpo, padding=(2, 0, 8, 0))
         painel.grid(row=0, column=1, rowspan=2, sticky="nsew")
         painel.columnconfigure(0, weight=1)
         painel.rowconfigure(2, weight=1)
 
-        ttk.Label(painel, textvariable=self.curso_revisao_nome,
-                  style="Titulo.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Button(painel, text="Trocar curso...", command=self._abrir_atribuicao_curso).grid(
-            row=0, column=1, sticky="e", padx=(8, 0))
-        ttk.Label(painel, textvariable=self.curso_revisao_cor).grid(
-            row=1, column=0, sticky="w", pady=(2, 8))
+        topo_curso = ttk.LabelFrame(painel, text="Curso desta Capa (ao escolher, já grava na lista principal)", padding=6)
+        topo_curso.grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 6))
+
+        ttk.Label(topo_curso, textvariable=self.curso_revisao_nome, font=("Segoe UI Semibold", 11)).pack(side="left", padx=(0, 8))
         self.amostra_cor_revisao = tk.Canvas(
-            painel, width=34, height=20, background=COR_CAMPO, highlightthickness=1,
+            topo_curso, width=26, height=18, background=COR_CAMPO, highlightthickness=1,
             highlightbackground=COR_BORDA,
         )
-        self.amostra_cor_revisao.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(2, 8))
+        self.amostra_cor_revisao.pack(side="left", padx=(0, 10))
 
-        imagens = ttk.Frame(painel, height=320)
+        self.combo_curso_direto = ttk.Combobox(
+            topo_curso, textvariable=self.curso_para_foto, width=28,
+            postcommand=lambda: self.combo_curso_direto.configure(values=self.cursos_disponiveis),
+        )
+        self.combo_curso_direto.pack(side="left", padx=(0, 6))
+        self.combo_curso_direto.bind("<<ComboboxSelected>>", lambda e: self._definir_curso_direto())
+        self.combo_curso_direto.bind("<Return>", lambda e: self._definir_curso_direto())
+
+        ttk.Button(
+            topo_curso, text="Gravar Curso", style="Primario.TButton", command=self._definir_curso_direto
+        ).pack(side="left", padx=(0, 6))
+
+        ttk.Button(
+            topo_curso, text="Aplicar nos Sem Curso", command=self._aplicar_curso_sem_curso
+        ).pack(side="left")
+
+        ttk.Label(painel, textvariable=self.curso_revisao_cor, style="Dica.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(0, 4))
+
+        imagens = ttk.LabelFrame(painel, text="Prévia Grande da Capa", padding=4)
         imagens.grid(row=2, column=0, columnspan=2, sticky="nsew")
         imagens.grid_propagate(False)
         imagens.columnconfigure(0, weight=1)
@@ -1856,11 +1865,9 @@ class AbaFotos:
         self.previa_revisao_capa.grid(row=0, column=0, sticky="nsew")
         self.quadro_previa_revisao = imagens
         imagens.bind("<Configure>", lambda e: self._mostrar_previa_revisao(self._capa_revisao_atual))
-        ttk.Label(painel, textvariable=self.foto_revisao_atual).grid(
-            row=3, column=0, sticky="w", pady=(6, 0))
 
         quadro_nome = ttk.LabelFrame(painel, text="Nome nesta capa", padding=6)
-        quadro_nome.grid(row=4, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        quadro_nome.grid(row=3, column=0, columnspan=2, sticky="we", pady=(6, 0))
         quadro_nome.columnconfigure(1, weight=1)
         ttk.Label(quadro_nome, textvariable=self.nome_revisao_titulo,
                   font=("Segoe UI Semibold", 10)).grid(row=0, column=0, columnspan=6, sticky="w")
@@ -1880,23 +1887,94 @@ class AbaFotos:
             quadro_nome, text="Automático", command=self._ajuste_nome_automatico, state="disabled")
         self.botao_nome_auto.grid(row=2, column=4, padx=(12, 0), pady=(4, 0))
         self.botao_nome_salvar = ttk.Button(
-            quadro_nome, text="Salvar", style="Primario.TButton", command=self._salvar_ajuste_nome, state="disabled")
+            quadro_nome, text="Salvar Nome", style="Primario.TButton", command=self._salvar_ajuste_nome, state="disabled")
         self.botao_nome_salvar.grid(row=2, column=5, padx=(6, 0), pady=(4, 0))
-        ttk.Label(quadro_nome, textvariable=self.status_nome, wraplength=620).grid(
+        ttk.Label(quadro_nome, textvariable=self.status_nome, wraplength=540).grid(
             row=3, column=0, columnspan=6, sticky="w", pady=(4, 0))
         self.escala1_nome.trace_add("write", lambda *a: self._escala_nome_mudou(1))
         self.escala2_nome.trace_add("write", lambda *a: self._escala_nome_mudou(2))
 
         acoes = ttk.Frame(painel)
-        acoes.grid(row=5, column=0, sticky="we", pady=(8, 0))
+        acoes.grid(row=4, column=0, columnspan=2, sticky="we", pady=(6, 0))
         ttk.Button(acoes, text="Atualizar revisão", command=self._atualizar_revisao_manual).pack(side="left")
-        ttk.Button(acoes, text="Abrir foto no recorte", command=self._abrir_foto_revisao).pack(
+        ttk.Button(acoes, text="Refazer prévia do PSD", command=self._excluir_previa_revisao).pack(
             side="left", padx=6)
-        ttk.Button(acoes, text="Excluir da revisão", command=self._excluir_da_revisao).pack(side="left")
-        ttk.Button(acoes, text="Refazer prévia", command=self._excluir_previa_revisao).pack(
-            side="left", padx=6)
-        ttk.Label(painel, textvariable=self.status_revisao, wraplength=640).grid(
-            row=6, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(acoes, text="Ocultar da revisão", command=self._excluir_da_revisao).pack(side="left")
+        ttk.Label(painel, textvariable=self.status_revisao, wraplength=560, style="Dica.TLabel").grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        # ---------------- Coluna Direita (PEQUENA): Recorte Compacto da Foto ----------------
+
+        quadro_recorte = ttk.LabelFrame(
+            corpo, text="Recorte da Foto (arraste / rodinha)", padding=6
+        )
+        quadro_recorte.grid(row=0, column=2, rowspan=2, sticky="ns")
+
+        self.tela = tk.Canvas(
+            quadro_recorte, width=260, height=250, background=COR_FUNDO,
+            highlightthickness=0, cursor="fleur",
+        )
+        self.tela.pack(fill="x")
+        self.tela.bind("<Configure>", lambda e: self._desenhar())
+        self.tela.bind("<ButtonPress-1>", self._pressionar)
+        self.tela.bind("<B1-Motion>", self._arrastar)
+        self.tela.bind("<ButtonRelease-1>", self._soltar)
+        self.tela.bind("<MouseWheel>", self._rodinha)
+        for tecla, dx, dy in (("Left", -1, 0), ("Right", 1, 0), ("Up", 0, -1), ("Down", 0, 1)):
+            self.tela.bind("<" + tecla + ">", lambda e, dx=dx, dy=dy: self._mover_teclado(dx, dy, e))
+        self.tela.bind("<plus>", lambda e: self._zoom_relativo(0.97))
+        self.tela.bind("<minus>", lambda e: self._zoom_relativo(1.03))
+        self.tela.bind("<Control-z>", lambda e: self.desfazer())
+
+        ferramentas = ttk.Frame(quadro_recorte)
+        ferramentas.pack(fill="x", pady=(6, 0))
+        self.botoes_editor = []
+        for texto, comando in (
+            ("Auto", self.auto_rosto),
+            ("Centrar", self.centralizar_rosto),
+            ("Desfazer", self.desfazer),
+        ):
+            b = ttk.Button(ferramentas, text=texto, command=comando)
+            b.pack(side="left", expand=True, fill="x", padx=1)
+            self.botoes_editor.append(b)
+
+        quadro_zoom = ttk.Frame(quadro_recorte)
+        quadro_zoom.pack(fill="x", pady=(6, 0))
+        ttk.Label(quadro_zoom, text="Zoom:").pack(side="left")
+        self.controle_zoom = ttk.Scale(
+            quadro_zoom, from_=15, to=100, variable=self.zoom, orient="horizontal", length=190
+        )
+        self.controle_zoom.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        for evento in ("<B1-Motion>", "<ButtonRelease-1>"):
+            self.controle_zoom.bind(evento, lambda e: self.root.after_idle(self._zoom_escala, self.zoom.get()), add="+")
+
+        acoes_foto = ttk.Frame(quadro_recorte)
+        acoes_foto.pack(fill="x", pady=(8, 0))
+        self.botao_salvar = ttk.Button(
+            acoes_foto, text="Salvar Recorte desta Foto", style="Primario.TButton",
+            command=lambda: self.salvar(False),
+        )
+        self.botao_salvar.pack(fill="x")
+        self.botao_salvar_prox = ttk.Button(
+            acoes_foto, text="Salvar e Próxima Foto", command=lambda: self.salvar(True)
+        )
+        self.botao_salvar_prox.pack(fill="x", pady=(4, 0))
+        self.botao_restaurar = ttk.Button(
+            acoes_foto, text="Restaurar Foto Original", command=self.restaurar
+        )
+        self.botao_restaurar.pack(fill="x", pady=(4, 0))
+
+        ttk.Label(quadro_recorte, textvariable=self.foto_revisao_atual, style="Dica.TLabel", wraplength=250).pack(
+            anchor="w", pady=(8, 0)
+        )
+        ttk.Label(quadro_recorte, textvariable=self.info, style="Dica.TLabel", justify="left", wraplength=250).pack(
+            anchor="w", pady=(4, 0)
+        )
+        tk.Label(
+            quadro_recorte, textvariable=self.alerta, foreground=COR_VERMELHO,
+            background=COR_SUPERFICIE, justify="left", wraplength=250, anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+
 
     def _ler_cursos_foto(self):
 
@@ -2365,7 +2443,13 @@ class AbaFotos:
         self.curso_revisao_nome.set(grupo["curso"])
         amostra = grupo.get("amostra")
         if amostra and amostra.get("foto"):
-            self.foto_revisao_atual.set(Path(amostra["foto"]).name)
+            arq_amostra = Path(amostra["foto"])
+            self.foto_revisao_atual.set(arq_amostra.name)
+            if self.lista.exists(arq_amostra.name):
+                self.lista.selection_set(arq_amostra.name)
+                self.lista.see(arq_amostra.name)
+            if self.arquivo != arq_amostra and not self.ocupado:
+                self.abrir(arq_amostra)
         if grupo["simbolo"] and grupo["curso"] in self.cursos_disponiveis:
             self.curso_para_foto.set(grupo["curso"])
         else:
@@ -2511,10 +2595,22 @@ class AbaFotos:
         self._previa_aluno = None
         self._preencher_controles_nome(entrada)
         self.curso_revisao_nome.set(grupo["curso"])
+        if grupo.get("simbolo") and grupo["curso"] in self.cursos_disponiveis:
+            self.curso_para_foto.set(grupo["curso"])
+        elif entrada.get("curso") and entrada["curso"] in self.cursos_disponiveis:
+            self.curso_para_foto.set(entrada["curso"])
         self.nome_revisao_titulo.set(
             entrada["nome"] + "  -  capa " + entrada["tamanho_capa"] + "  (" + grupo["curso"] + ")")
-        self.foto_revisao_atual.set(
-            Path(entrada["foto"]).name if entrada.get("foto") else "Sem foto: prévia com fundo neutro")
+        if entrada.get("foto"):
+            arq_aluno = Path(entrada["foto"])
+            self.foto_revisao_atual.set(arq_aluno.name)
+            if self.lista.exists(arq_aluno.name):
+                self.lista.selection_set(arq_aluno.name)
+                self.lista.see(arq_aluno.name)
+            if self.arquivo != arq_aluno and not self.ocupado:
+                self.abrir(arq_aluno)
+        else:
+            self.foto_revisao_atual.set("Sem foto: prévia com fundo neutro")
         self.status_nome.set("Montando a prévia desta capa...")
         cfg = dict(self.cfg)
         calibracao = dict(self._calibracao())
@@ -2781,12 +2877,106 @@ class AbaFotos:
             self.status_revisao.set("Não há uma foto correspondente para abrir no recorte.")
             return
         arquivo = Path(amostra["foto"])
-        self.janela.abas.select(self.janela.quadro_fotos)
         if self.lista.exists(arquivo.name):
             self.lista.selection_set(arquivo.name)
             self.lista.see(arquivo.name)
         if self.arquivo != arquivo:
             self.abrir(arquivo)
+        self.tela.focus_set()
+
+    def selecionar_aluno_por_nome(self, nome_aluno):
+        """Seleciona o aluno e seu curso na aba unificada Revisão e Recorte."""
+
+        rf = self._modulo()
+        alvo_chave = rf.chave(nome_aluno)
+        for chave_grupo, grupo in self._revisao_por_curso.items():
+            for entrada in grupo.get("entradas", []):
+                if rf.chave(entrada.get("nome", "")) == alvo_chave:
+                    self._curso_revisao_selecionado = chave_grupo
+                    self._aluno_escolhido = (entrada["nome"], entrada["tamanho_capa"])
+                    for iid, cg in self._revisao_grupo_por_iid.items():
+                        if cg == chave_grupo and self.lista_revisao.exists(iid):
+                            self.lista_revisao.selection_set(iid)
+                            self.lista_revisao.see(iid)
+                            break
+                    self._selecionar_curso_revisao()
+                    for iid, (_, ent) in self._alunos_por_iid.items():
+                        if rf.chave(ent.get("nome", "")) == alvo_chave and self.lista_alunos.exists(iid):
+                            self.lista_alunos.selection_set(iid)
+                            self.lista_alunos.see(iid)
+                            self._selecionar_aluno_revisao()
+                            break
+                    return
+
+    def _definir_curso_direto(self):
+        """Grava imediatamente o curso selecionado na barra acima da prévia para o aluno/foto atual e atualiza a lista."""
+
+        curso = self.curso_para_foto.get().strip()
+        if not curso:
+            self.status_revisao.set("Escolha um curso na caixa acima da prévia.")
+            return
+        entrada, _ = self._alvo_troca_curso()
+        arquivo = Path(entrada["foto"]) if entrada and entrada.get("foto") else self.arquivo
+        if not arquivo:
+            self.status_revisao.set("Selecione um aluno ou uma foto para gravar o curso.")
+            return
+        if self._salvar_curso_foto(arquivo, curso):
+            if entrada:
+                self._aluno_escolhido = (entrada["nome"], entrada["tamanho_capa"])
+            try:
+                automacao = modulo_automacao()
+                canonico = automacao.CURSO_ALIASES.get(automacao.chave(curso), curso)
+                self._curso_revisao_selecionado = automacao.chave(canonico)
+            except Exception:
+                pass
+
+    def _aplicar_curso_sem_curso(self):
+        """Aplica o curso selecionado no topo a todos os alunos que estão sem curso na revisão."""
+
+        curso = self.curso_para_foto.get().strip()
+        if not curso:
+            self.status_revisao.set("Escolha um curso na caixa ao lado antes de aplicar aos alunos sem curso.")
+            return
+        try:
+            simbolo, _ = modulo_automacao().resolver_curso(curso)
+            if not simbolo:
+                raise ValueError("Curso sem brasão válido.")
+        except Exception as e:
+            self.status_revisao.set("Curso inválido: " + str(e))
+            return
+
+        rf = self._modulo()
+        alterados = 0
+        for chave_grupo, grupo in list(self._revisao_por_curso.items()):
+            if grupo.get("simbolo"):
+                continue
+            for entrada in grupo.get("entradas", []):
+                if entrada.get("foto"):
+                    arq = Path(entrada["foto"])
+                    self.cursos_manuais[chave_caminho_foto(arq)] = curso
+                    alterados += 1
+                    try:
+                        self.janela.sincronizar_curso_aluno(entrada["nome"], curso)
+                    except Exception:
+                        pass
+        if not alterados:
+            # Se não havia grupo sem símbolo, aplica ao grupo atualmente selecionado se for sem curso
+            entrada, _ = self._alvo_troca_curso()
+            if entrada and entrada.get("foto"):
+                self._definir_curso_direto()
+                return
+            self.status_revisao.set("Todos os alunos já possuem curso definido.")
+            return
+
+        try:
+            self._gravar_cursos_foto()
+            automacao = modulo_automacao()
+            canonico = automacao.CURSO_ALIASES.get(automacao.chave(curso), curso)
+            self._curso_revisao_selecionado = automacao.chave(canonico)
+        except Exception:
+            pass
+        self.status_revisao.set("Curso " + curso + " gravado para " + str(alterados) + " aluno(s) e salvo na lista!")
+        self._recarregar_revisao()
 
     def _alvo_troca_curso(self):
         """(entrada, é_amostra): o aluno selecionado na lista ou, sem seleção, a amostra do curso."""
@@ -2871,7 +3061,13 @@ class AbaFotos:
         except Exception as e:
             self.status_revisao.set("Não foi possível atribuir o curso: " + str(e))
             return False
-        self.status_revisao.set("Curso " + curso + " salvo para " + arquivo.name + ".")
+        try:
+            rf = self._modulo()
+            nome_aluno = rf.nome_do_aluno(Path(arquivo))
+            self.janela.sincronizar_curso_aluno(nome_aluno, curso)
+        except Exception:
+            pass
+        self.status_revisao.set("Curso " + curso + " salvo para " + arquivo.name + " e gravado na lista de Capas.")
         self._recarregar_revisao()
         return True
 
@@ -2995,6 +3191,15 @@ class AbaFotos:
 
     def proxima(self):
 
+        itens_alunos = self.lista_alunos.get_children()
+        if itens_alunos:
+            atual_aluno = self.lista_alunos.selection()
+            indice_a = itens_alunos.index(atual_aluno[0]) + 1 if atual_aluno and atual_aluno[0] in itens_alunos else 0
+            if indice_a < len(itens_alunos):
+                self.lista_alunos.selection_set(itens_alunos[indice_a])
+                self.lista_alunos.see(itens_alunos[indice_a])
+                self._selecionar_aluno_revisao()
+                return
         itens = self.lista.get_children()
         if not itens:
             return
@@ -3415,10 +3620,23 @@ class AbaFotos:
             else:
                 self.alerta.set("Prévia da capa ainda não gerada: clique em \"Gerar prévia da capa\".")
 
-        imagem = imagem.copy()
-        imagem.thumbnail((380, 380), Image.LANCZOS)
+        # Atualiza ao vivo a Prévia Grande da Capa no centro enquanto arrasta o recorte!
+        if self._aluno_nome and self._previa_aluno and self._aluno_nome[1].get("foto") and self.arquivo:
+            try:
+                if Path(self._aluno_nome[1]["foto"]).resolve() == self.arquivo.resolve():
+                    self._previa_aluno = (recortada, self._previa_aluno[1], self._previa_aluno[2])
+                    self._renderizar_nome_revisao()
+                elif imagem is not recortada:
+                    self._mostrar_previa_revisao(imagem)
+            except Exception:
+                pass
+        elif imagem is not recortada:
+            self._mostrar_previa_revisao(imagem)
+
+        imagem_min = imagem.copy()
+        imagem_min.thumbnail((380, 380), Image.LANCZOS)
         fundo = Image.new("RGB", (380, 380), COR_FUNDO)
-        fundo.paste(imagem, ((380 - imagem.width) // 2, (380 - imagem.height) // 2))
+        fundo.paste(imagem_min, ((380 - imagem_min.width) // 2, (380 - imagem_min.height) // 2))
         self._img_previa = ImageTk.PhotoImage(fundo)
         self.rotulo_previa.configure(image=self._img_previa)
 

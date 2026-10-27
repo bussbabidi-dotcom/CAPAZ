@@ -342,29 +342,62 @@ def nome_do_aluno(caminho):
     return formatar_nome(nome)
 
 
+def _cursos_salvos_por_foto():
+    """Lê cursos_por_foto.json e devolve mapas por caminho normalizado e por chave do nome do aluno."""
+    arquivo_cursos = PASTA / "cursos_por_foto.json"
+    por_caminho = {}
+    por_nome = {}
+    try:
+        dados = json.loads(arquivo_cursos.read_text(encoding="utf-8"))
+        mapa = dados.get("cursos_por_foto", {}) if isinstance(dados, dict) else {}
+        if isinstance(mapa, dict):
+            for cam, cur in mapa.items():
+                cur_str = str(cur or "").strip()
+                if not cur_str:
+                    continue
+                norm = os.path.normcase(os.path.abspath(os.path.normpath(str(cam))))
+                por_caminho[norm] = cur_str
+                try:
+                    nm = nome_do_aluno(Path(cam))
+                    if nm:
+                        por_nome[chave(nm)] = cur_str
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return por_caminho, por_nome
+
+
 def alunos_das_fotos(pasta):
     """
     Monta a lista de capas só com as fotos da pasta (sem planilha):
     foto com 24X34 -> Berlim; com 20X20 (sem 24X34) -> Essencial; sem tamanho -> Prime 30X20.
-    Retorna [{"nome", "plano"}] em ordem alfabética.
+    Recupera também o curso já salvo na revisão (cursos_por_foto.json).
+    Retorna [{"nome", "curso", "plano"}] em ordem alfabética.
     """
+    por_caminho, por_nome = _cursos_salvos_por_foto()
     por_aluno = {}
     for f in listar_fotos(pasta):
         nome = nome_do_aluno(f)
         if not nome:
             continue
-        reg = por_aluno.setdefault(chave(nome), {"nome": nome, "tamanhos": set()})
+        ch = chave(nome)
+        reg = por_aluno.setdefault(ch, {"nome": nome, "curso": "", "tamanhos": set()})
         reg["tamanhos"].add(tamanho_do_arquivo(f))
+        if not reg["curso"]:
+            norm = os.path.normcase(os.path.abspath(os.path.normpath(str(f))))
+            reg["curso"] = por_caminho.get(norm) or por_nome.get(ch) or ""
 
     alunos = []
     for reg in sorted(por_aluno.values(), key=lambda r: chave(r["nome"])):
         tamanhos = reg["tamanhos"]
+        curso = reg.get("curso") or ""
         if "24X34" in tamanhos:
-            alunos.append({"nome": reg["nome"], "plano": PLANO_POR_TAMANHO["24X34"]})
+            alunos.append({"nome": reg["nome"], "curso": curso, "plano": PLANO_POR_TAMANHO["24X34"]})
         elif "20X20" in tamanhos:
-            alunos.append({"nome": reg["nome"], "plano": PLANO_POR_TAMANHO["20X20"]})
+            alunos.append({"nome": reg["nome"], "curso": curso, "plano": PLANO_POR_TAMANHO["20X20"]})
         if "30X20" in tamanhos:
-            alunos.append({"nome": reg["nome"], "plano": PLANO_POR_TAMANHO["30X20"]})
+            alunos.append({"nome": reg["nome"], "curso": curso, "plano": PLANO_POR_TAMANHO["30X20"]})
     return alunos
 
 
