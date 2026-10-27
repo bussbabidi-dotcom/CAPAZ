@@ -1,0 +1,118 @@
+Abraim Da Silva Cury	PSICOLOGIA	PLANO 30X22
+Alessandro Roque Ferreira	DIREITO	PLANO 30X22
+Alexsander Rezes Da Costa	CIÊNCIAS CONTÁBEIS	PLANO 30X22
+Amanda Ferreira Galúcio	PSICOLOGIA	PLANO 30X22
+Ana Beatriz Cantuária Nunes	ODONTOLOGIA	PLANO 30X22
+Ana Carolina De Souza Da Silva	BIOMEDICINA	PLANO 30X22
+Ana Cristina Corrêa Araújo	ENFERMAGEM	PLANO 30X22
+Ana Cristina Souza Da Fonseca	MEDICINA VETERINARIA	PLANO 30X22
+Ana Elenita De Assunção Malcher	PSICOLOGIA	PLANO 30X22
+Ana Eliza De Melo Ferreira	PSICOLOGIA	PLANO 30X22
+Ana Karoline Campos Silva	FISIOTERAPIA	PLANO 30X22
+Ana Paula Simões Do Val	FARMÁCIA	PLANO 30X22
+Angela Dos Santos Silva	BIOMEDICINA	PLANO 30X22
+Antônia Klayra Barroso Da Silva	NUTRIÇÃO	PLANO 30X22
+Ariane Lopes de Lima	ODONTOLOGIA	PLANO 30X22
+Aryson Palheta Aquino	ODONTOLOGIA	PLANO 30X22
+Beatriz Da Silva Nunes	MEDICINA VETERINARIA	PLANO 30X22
+Beatriz Lima Da Silva	LETRAS	PLANO 30X22
+Brenda Carvalho Do Nascimento	ADS- ANALISE E DESENVOLVIMENTO DE SISTEMA	PLANO 30X22
+Breno Rocha Reis	DIREITO	PLANO 30X22
+Bruna Beatriz Livas Pereira	PSICOLOGIA	PLANO 30X22
+Bruna Castro Araujo	FISIOTERAPIA	PLANO 30X22
+Bruno Justino Alves	ENGENHARIA DE PRODUÇÃO	PLANO 30X22
+Caio Cesar Ferreira Augusto	ENGENHARIA MECÂNICA	PLANO 30X22
+Camila Roberta Souza De Lima	PSICOLOGIA	PLANO 30X22
+Carla Alice De Assis Pinheiro	PSICOLOGIA	PLANO 30X22
+Cátia Remijo Vieira	ENFERMAGEM	PLANO 30X22
+Clarice Da Silva E Silva	ENFERMAGEM	PLANO 30X22
+Cleide Mara Aquino Cunha	BIOMEDICINA	PLANO 30X22
+Conceição Figueiredo De Lemos	FISIOTERAPIA	PLANO 30X22
+Cristina Alexandra Sena Mariano	NUTRIÇÃO	PLANO 30X22
+Daniel Moura Da Silva E Silva	FARMÁCIA	PLANO 30X22
+Daniela Oliveira Da Silva	MEDICINA VETERINARIA	PLANO 30X22
+Daniele Emily Oliveira dos Santos	PSICOLOGIA	PLANO 30X22
+David Washington Dos Santos Moreira	EDUCAÇAO FISICA	PLANO 30X22
+Debora Lima Da Silva	ODONTOLOGIA	PLANO 30X22
+Diego Guimarães Reis	ENGENHARIA MECÂNICA	PLANO 30X22
+Djeine Lorena Zimmer Da Silva	NUTRIÇÃO	PLANO 30X22
+Edirley Monteiro Ferreira	ENFERMAGEM	PLANO 30X22
+Eduarda Gabriela Ferreira Lima	ENFERMAGEM	PLANO 30X22
+Elion Santiago Feitoza	ENGENHARIA DA COMPUTAÇAO	PLANO 30X22
+Érica Marreiros Frazão	ODONTOLOGIA	PLANO 30X22
+Ericka Peres de Freitas	DIREITO	PLANO 30X22
+Fabianne Vasconcelos Da Silva	DIREITO	PLANO 30X22
+Fábio Nestor Do Espírito Santo Brandão	ENGENHARIA DA COMPUTAÇAO	PLANO 30X22
+Fernanda Kelly De Abreu Teixeira	FISIOTERAPIA	PLANO 30X22
+Francineia Cartaxo Da Silva	DIREITO	PLANO 30X22
+Francisca Ivanilsa Carmo De Souza	NUTRIÇÃO	PLANO 30X22
+Gabriel Gonçalves Oliveira dos Santos	CIENCIA DA COMPUTAÇÃO	PLANO 30X22
+Gabriel Melo De Oliveira	ADS- ANALISE E DESENVOLVIMENTO DE SISTEMA	PLANO 30X22
+Gabriela Vitória Batista Da Cunha	MEDICINA VETERINARIA	PLANO 30X22
+Geicivania Gomes Da Silva	ENFERMAGEM	PLANO 30X22
+Gémina Serrão De Souza	BIOMEDICINA	PLANO 30X22
+Giele Da Silva Rocha	BIOMEDICINA	PLANO 30X22
+Giovanna Gabrielly Araújo Procópio	ODONTOLOGIA	PLANO 30X22
+Havila Leandro Monteiro De Oliveira	ARQUITETURA E URBANISMO	PLANO 30X22
+Hélio Alves Cardenes Filho	FISIOTERAPIA	PLANO 30X22
+Henry Araujo De Lima	ENGENHARIA DA COMPUTAÇAO	PLANO 30X22
+Herbert Carlos Pimentel Dos Santos	ODONTOLOGIA	PLANO 30X22
+Irisson Braz Da Silva	ENFERMAGEM	PLANO 30X22
+Isabel De Souza Rocha	ENFERMAGEM	PLANO 30X22
+Izael Feitosa Dos Santos	MEDICINA VETERINARIA	PLANO 30X22
+Iziane Lima De Souza	BIOMEDICINA	PLANO 30X22
+Jamila Maria Honorio De Araújo	PSICOLOGIA	PLANO 30X22
+Jamiles Gonçalves Dos Anjos	ENFERMAGEM	PLANO 30X22
+Jamily Machado Da Silva	DIREITO	PLANO 30X22
+Janaína Seixas Pimenta	EDUCAÇAO FISICA	PLANO 30X22
+Janayna Valente Cerdeira	FISIOTERAPIA	PLANO 30X22
+Jânio Martins Fernandes	MEDICINA VETERINARIA	PLANO 30X22
+Jefferson De Lima Silva Júnior	EDUCAÇAO FISICA	PLANO 30X22
+Jeremias Costa De Souza	ENGENHARIA ELÉTRICA	PLANO 30X22
+Jessica Santos do Carmo	ENGENHARIA CIVIL	PLANO 30X22
+João Carlos Teixeira	DIREITO	PLANO 30X22
+João Vitor Magalhães Lima De Oliveira	DIREITO	PLANO 30X22
+Jordann Winicius De Almeida Oliveira	FARMÁCIA	PLANO 30X22
+Josiane Silva Mendonça	CIÊNCIAS CONTÁBEIS	PLANO 30X22
+Kelly Taila Carvalho Campello	DIREITO	PLANO 30X22
+Kemylly Dos Santos Sakamoto	PSICOLOGIA	PLANO 30X22
+Laura Beatriz De Jesus Viana	LETRAS	PLANO 30X22
+Layanne Nascimento Dos Santos	BIOMEDICINA	PLANO 30X22
+Ledimar Carvalho De Almeida Oliveira	PSICOLOGIA	PLANO 30X22
+Leonarda Vasconcelos Liborio	FISIOTERAPIA	PLANO 30X22
+Leonardo Siqueira Frota	ENFERMAGEM	PLANO 30X22
+Liandra da Silva Vieira	BIOMEDICINA	PLANO 30X22
+Maik Mar Brito De Oliveira	DESIGN GRAFICO	PLANO 30X22
+Maressa De Souza Fernandes	PSICOLOGIA	PLANO 30X22
+Maria Das Dores De Souza Alves	BIOMEDICINA	PLANO 30X22
+Maria Fernanda Braga Gurgel	PSICOLOGIA	PLANO 30X22
+Maria Paula De Lima Caxias Alves Pontes Leão	DIREITO	PLANO 30X22
+Marília Maia Barca	MARKETING	PLANO 30X22
+Marilia Melo Fonseca	FISIOTERAPIA	PLANO 30X22
+Marlon André Pinto Dos Santos	ENGENHARIA CIVIL	PLANO 30X22
+Milena Da Silva Braga	ODONTOLOGIA	PLANO 30X22
+Naomi Silva Cardoso	PSICOLOGIA	PLANO 30X22
+Natália Alves De Araújo	ENGENHARIA CIVIL	PLANO 30X22
+Osmarina Albuquerque Farias	BIOMEDICINA	PLANO 30X22
+Patrícia Santos de Souza Moreira	BIOMEDICINA	PLANO 30X22
+Paulo Izidório Santos Da Silva	CIENCIA DA COMPUTAÇÃO	PLANO 30X22
+Pedro Lucas Marinho Carvalho	ENGENHARIA DA COMPUTAÇAO	PLANO 30X22
+Quéren Medeiros Nascimento	PSICOLOGIA	PLANO 30X22
+Rafael Queiroz Dos Santos Da Silva	FARMÁCIA	PLANO 30X22
+Raielma Pereira Da Costa	ESTETICA E COSMETICA	PLANO 30X22
+Raimundo Da Silva Bezerra	ADS- ANALISE E DESENVOLVIMENTO DE SISTEMA	PLANO 30X22
+Rayssa Mendes Dos Santos	FISIOTERAPIA	PLANO 30X22
+Rebeca França Da Silva	FISIOTERAPIA	PLANO 30X22
+Renner Ferreira Barbosa	FISIOTERAPIA	PLANO 30X22
+Risonete Menezes De Lima	BIOMEDICINA	PLANO 30X22
+Rita de Cássia Seixas Miranda	PSICOLOGIA	PLANO 30X22
+Rodrigo Franco De Deixa	ENGENHARIA MECÂNICA	PLANO 30X22
+Rúbia Suelem Soares Pucu	CIÊNCIAS CONTÁBEIS	PLANO 30X22
+Ryan Pablo Silva De Paula	CIENCIA DA COMPUTAÇÃO	PLANO 30X22
+Sandra De Assis Da Costa	PSICOLOGIA	PLANO 30X22
+Tabitah Nascimento Da Silva	NUTRIÇÃO	PLANO 30X22
+Tailane Nascimento de Souza	ENFERMAGEM	PLANO 30X22
+Tainá Fonseca Costa	ENGENHARIA CIVIL	PLANO 30X22
+Valdir Viktor Da Silva Mergulhão	EDUCAÇAO FISICA	PLANO 30X22
+Valéria Lameira Vaz	CIÊNCIAS CONTÁBEIS	PLANO 30X22
+WENDELL CRISTYAN SANTOS DA SILVA	MARKETING	PLANO 30X22

@@ -1,0 +1,58 @@
+
+===========================================================================
+AUTOMACAO DE CAPAS
+===========================================================================
+DRY_RUN: False
+EXPORT_JPG: True
+EXPORT_PSD: True
+SKIP_EXISTING: False
+FOTO_MATCH_FLEXIVEL: True
+BERLIM_GERAR_24: True
+BERLIM_GERAR_20: True
+PHOTOS_DIR: C:\Users\REIS\Documents\PAPA 2\capas\f
+PSD_DIR: C:\Users\REIS\Documents\PAPA 2\capas\CAPA
+
+PLANILHA: c:\Users\REIS\Documents\PAPA 2\vazio\capas\teste_30x22\planilha_teste.xlsx
+ABA: ALUNOS | CABEÇALHO NA LINHA 1
+
+TOTAL NA PLANILHA: 1
+APOS FILTROS: 1
+
+Checagem rapida antes do processamento...
+  Pre-check OK: 1 | com erro: 0
+
+---------------------------------------------------------------------------
+PROGRESSO: 1 / 1
+LINHA: 2
+NOME: Ana Beatriz Cantuária Nunes
+CURSO: DIREITO
+PLANO: PRIME BOOK 30X22
+
+>>> PROCESSANDO 30X22 FRENTE
+PSD: C:\Users\REIS\Documents\PAPA 2\capas\CAPA\CAPA FRENTE 30x22.jpg.psd
+FOTO: C:\Users\REIS\Documents\PAPA 2\capas\f\Ana Beatriz Cantuária Nunes.JPG
+JPG: c:\Users\REIS\Documents\PAPA 2\vazio\capas\teste_30x22\Ana-Beatriz-Cantuária-Nunes_30X22_FRENTE.jpg
+  FOTO FORA DO MOLDE: recortada automaticamente (pelo rosto): Ana Beatriz Cantuária Nunes.JPG
+
+ABRINDO PHOTOSHOP: PRIME BOOK 30X22 FRENTE
+ALUNO: Ana Beatriz Cantuária Nunes
+TEMPLATE: C:\Users\REIS\Documents\PAPA 2\capas\CAPA\CAPA FRENTE 30x22.jpg.psd
+
+>>> PROCESSANDO 30X22 VERSO
+PSD: C:\Users\REIS\Documents\PAPA 2\capas\CAPA\CAPA VERSO 30x22.jpg.psd
+JPG: c:\Users\REIS\Documents\PAPA 2\vazio\capas\teste_30x22\Ana-Beatriz-Cantuária-Nunes_30X22_VERSO.jpg
+
+ABRINDO PHOTOSHOP: PRIME BOOK 30X22 VERSO
+ALUNO: Ana Beatriz Cantuária Nunes
+TEMPLATE: C:\Users\REIS\Documents\PAPA 2\capas\CAPA\CAPA VERSO 30x22.jpg.psd
+STATUS: OK - 30X22 FRENTE GERADO + 30X22 VERSO GERADO
+
+RELATORIO: c:\Users\REIS\Documents\PAPA 2\vazio\capas\resultado_capas.csv
+
+===========================================================================
+PROCESSAMENTO FINALIZADO.
+OK: 1 | SKIP: 0 | ERRO: 0
+===========================================================================
+
+--- STDERR ---
+[ WARN:0@0.283] global net_impl_backend.cpp:345 cv::dnn::dnn5_v20260605::Net::Impl::setPreferableTarget Targets are not supported by the new graph engine for now

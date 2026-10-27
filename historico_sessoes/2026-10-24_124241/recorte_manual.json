@@ -1,0 +1,58 @@
+{
+  "Amaralina Pinho Godinho": {
+    "tamanho": "30X20",
+    "caixa": [
+      0.17604,
+      0.027478,
+      0.977906,
+      0.975036
+    ],
+    "origem": [
+      8464,
+      5568
+    ],
+    "data": "2026-10-24T12:18:28"
+  },
+  "Luiza Pereira Leal da Silva": {
+    "tamanho": "30X20",
+    "caixa": [
+      0.065658,
+      0.0,
+      0.924368,
+      1.0
+    ],
+    "origem": [
+      6016,
+      4016
+    ],
+    "data": "2026-10-24T12:18:34"
+  },
+  "Nalanda Luisa Sousa Pereira": {
+    "tamanho": "30X20",
+    "caixa": [
+      0.079371,
+      0.0,
+      0.910915,
+      0.840758
+    ],
+    "origem": [
+      7824,
+      6016
+    ],
+    "data": "2026-10-24T12:18:38"
+  },
+  "Suellen Letícia Moreira da Silva": {
+    "tamanho": "30X20",
+    "caixa": [
+      0.0,
+      0.059088,
+      1.0,
+      1.0
+    ],
+    "origem": [
+      6472,
+      5348
+    ],
+    "data": "2026-10-24T12:18:41"
+  }
+}

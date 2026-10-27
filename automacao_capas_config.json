@@ -1,0 +1,44 @@
+{
+  "photos_dir": "C:\\Users\\REIS\\Documents\\PAPA 2\\capas\\cap",
+  "planilha_dir": "",
+  "psd_dir": "C:\\Users\\REIS\\Documents\\PAPA 2\\capas\\CAPA",
+  "output_dirs": {
+    "20X20": "D:\\ÁLBUNS COLAÇÃO 2025.2\\CAPAS\\CAPAS 20X20",
+    "30X20": "D:\\ÁLBUNS COLAÇÃO 2025.2\\CAPAS\\CAPS 30X20",
+    "24X34": "D:\\ÁLBUNS COLAÇÃO 2025.2\\CAPAS\\CAPS 24X34",
+    "30X22": "D:\\ÁLBUNS COLAÇÃO 2026.1\\0970 - SANTARÉM\\PÓS-VENDA\\30X22\\CAPAS"
+  },
+  "dry_run": false,
+  "export_jpg": true,
+  "export_psd": true,
+  "skip_existing": true,
+  "foto_match_flexivel": true,
+  "berlim_gerar_24": true,
+  "berlim_gerar_20": true,
+  "planilha": null,
+  "recorte_moldes": {
+    "20X20": [
+      2694,
+      3012
+    ],
+    "30X20": [
+      3874,
+      3012
+    ],
+    "24X34": [
+      4160,
+      6240
+    ]
+  },
+  "recorte_backup_dir": "C:\\Users\\REIS\\Documents\\PAPA 2\\capas\\originais",
+  "recorte_ampliacao_maxima": 1.2,
+  "fotos_origem": "pasta",
+  "photos_local_dir": "C:\\Users\\REIS\\Documents\\PAPA 2\\capas\\cap",
+  "photos_link": "https://drive.google.com/drive/folders/1S6Uu9M7jFz4yw7MKa_hRsFmgWvPBDQuj?usp=drive_link",
+  "photos_drive_dir": "C:\\Users\\REIS\\Documents\\PAPA 2\\capas\\f",
+  "drive_sincronizar_antes": false,
+  "cores_cursos": {
+    "FARM": "#CCC100",
+    "RADIO": "#FFFF00"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "tamanho": "20X20",
+  "simbolo": "ENG DA COMP",
+  "rgb": [
+    33,
+    43,
+    74
+  ],
+  "foto": [
+    729.38,
+    -0.25,
+    1400.0,
+    749.56
+  ],
+  "foto_visivel": [
+    729.38,
+    0.0,
+    1400.0,
+    749.56
+  ],
+  "frente_depois_foto": true,
+  "psd_mtime_ns": 1792074395158960100,
+  "versao": 5,
+  "preset_png": "C:\\Users\\REIS\\Documents\\PAPA 2\\vazio\\capas\\previa_capas\\presets\\20X20_eng_da_comp_212b4a.png"
+}

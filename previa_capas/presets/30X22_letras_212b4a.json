@@ -1,0 +1,25 @@
+{
+  "tamanho": "30X22",
+  "simbolo": "LETRAS",
+  "rgb": [
+    33,
+    43,
+    74
+  ],
+  "foto": [
+    155.06,
+    -0.32,
+    1400.0,
+    965.26
+  ],
+  "foto_visivel": [
+    155.06,
+    0.0,
+    1400.0,
+    964.94
+  ],
+  "frente_depois_foto": true,
+  "psd_mtime_ns": 1792073671590750000,
+  "versao": 5,
+  "preset_png": "C:\\Users\\REIS\\Documents\\PAPA 2\\vazio\\capas\\previa_capas\\presets\\30X22_letras_212b4a.png"
+}

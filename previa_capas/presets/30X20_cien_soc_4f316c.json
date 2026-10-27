@@ -1,0 +1,25 @@
+{
+  "tamanho": "30X20",
+  "simbolo": "CIEN SOC",
+  "rgb": [
+    79,
+    49,
+    108
+  ],
+  "foto": [
+    720.69,
+    -3.33,
+    1400.0,
+    528.16
+  ],
+  "foto_visivel": [
+    720.69,
+    0.0,
+    1400.0,
+    528.16
+  ],
+  "frente_depois_foto": true,
+  "psd_mtime_ns": 1790781634502042900,
+  "versao": 5,
+  "preset_png": "C:\\Users\\REIS\\Documents\\PAPA 2\\vazio\\capas\\previa_capas\\presets\\30X20_cien_soc_4f316c.png"
+}

@@ -1,0 +1,20 @@
+{
+  "20X20": {
+    "centro_x": 0.485,
+    "olhos_y": 0.2915,
+    "altura_rosto": 0.1692,
+    "amostras": 24
+  },
+  "30X20": {
+    "centro_x": 0.5038,
+    "olhos_y": 0.2756,
+    "altura_rosto": 0.1844,
+    "amostras": 27
+  },
+  "24X34": {
+    "centro_x": 0.5051,
+    "olhos_y": 0.2822,
+    "altura_rosto": 0.153,
+    "amostras": 16
+  }
+}
