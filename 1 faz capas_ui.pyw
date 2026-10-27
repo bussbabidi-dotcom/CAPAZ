@@ -646,7 +646,13 @@ class JanelaCapas:
             topo_rapido, text="Carregar Fotos da Pasta (1 Clique)", style="Primario.TButton",
             command=self.ler_fotos,
         )
-        self.botao_ler_fotos.pack(side="left", padx=(0, 12))
+        self.botao_ler_fotos.pack(side="left", padx=(0, 6))
+
+        self.botao_escolher_fotos = ttk.Button(
+            topo_rapido, text="Escolher Melhores Fotos (Subpastas)", style="Primario.TButton",
+            command=self._escolher_melhores_fotos_subpastas,
+        )
+        self.botao_escolher_fotos.pack(side="left", padx=(0, 10))
 
         ttk.Label(topo_rapido, text="Curso p/ todos:").pack(side="left", padx=(4, 4))
         self.campo_curso_todos = ttk.Combobox(
@@ -1017,6 +1023,110 @@ class JanelaCapas:
         if erro:
             texto += "  " + erro
         self.status.set(texto)
+
+    def _escolher_melhores_fotos_subpastas(self):
+        """Abre uma pasta com as subpastas de cada formando, escolhe a melhor foto conforme o plano e copia p/ FOTO."""
+
+        from tkinter import filedialog
+
+        if getattr(self, "_escolhendo_fotos", False):
+            return
+
+        rf = modulo_recorte()
+        bruto = rf.ler_config_bruto()
+        pasta_inicial = bruto.get("subpastas_fotos_dir") or bruto.get("photos_dir") or str(PASTA)
+        pasta = filedialog.askdirectory(
+            title="Escolha a pasta principal com as subpastas dos formandos",
+            initialdir=pasta_inicial if Path(pasta_inicial).is_dir() else str(PASTA),
+        )
+        if not pasta:
+            return
+
+        try:
+            rf.gravar_config({"subpastas_fotos_dir": pasta})
+        except Exception:
+            pass
+
+        self._escolhendo_fotos = True
+        self.botao_escolher_fotos.configure(state="disabled")
+        self.botao_ler_fotos.configure(state="disabled")
+        self._limpar_saida()
+        self._escrever("Iniciando seleção inteligente das melhores fotos em: " + pasta + "\n")
+        self._escrever("Critérios: Pessoa sozinha · Nitidez (não embaçada) · Orientação + Melhor encaixe pós-corte · Rosto de frente · Iluminação · 300 DPI\n\n")
+
+        alunos_atuais = list(self.carregar())
+        plano_padrao = self.plano_todos.get().strip() or "Prime Book 30X20"
+        curso_padrao = self.curso_todos.get().strip()
+        berlim_modo = self.berlim.get().strip() or "Ambos"
+
+        def progresso(atual, total, msg):
+            self.root.after(0, lambda: self.status.set(f"[{atual}/{total}] {msg}"))
+
+        def trabalho():
+            erro = None
+            relatorio = []
+            try:
+                cfg = rf.carregar_config()
+                calib = rf.carregar_calibracao(cfg)
+                relatorio = rf.escolher_melhores_fotos_subpastas(
+                    pasta,
+                    cfg,
+                    calib=calib,
+                    alunos_planos=alunos_atuais,
+                    plano_padrao=plano_padrao,
+                    curso_padrao=curso_padrao,
+                    berlim_modo=berlim_modo,
+                    progresso_cb=progresso,
+                )
+            except Exception as e:
+                erro = str(e)
+            self.root.after(0, lambda: self._melhores_fotos_prontas(relatorio, erro))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _melhores_fotos_prontas(self, relatorio, erro):
+
+        self._escolhendo_fotos = False
+        self.botao_escolher_fotos.configure(state="normal")
+        self.botao_ler_fotos.configure(state="normal")
+
+        if erro:
+            self.status.set("Erro ao escolher fotos: " + erro)
+            self._escrever("\nERRO: " + erro + "\n")
+            return
+
+        ok_count = 0
+        for item in relatorio:
+            escolhidas = item.get("escolhidas") or {}
+            if escolhidas:
+                ok_count += 1
+                resumos = [
+                    f"{tam}: {info['nome_arquivo']} ({info['nota']} pts — {info['resumo']})"
+                    for tam, info in escolhidas.items()
+                ]
+                self._escrever(f"OK — {item['nome']} [{item['plano']}]: " + " | ".join(resumos) + "\n")
+            else:
+                self._escrever(f"AVISO — {item['nome']}: nenhuma foto encontrada na subpasta.\n")
+
+        # Atualiza a tabela com os alunos e planos processados
+        novos_alunos = [
+            {"nome": r["nome"], "curso": r.get("curso") or "", "plano": r.get("plano") or "Prime Book 30X20"}
+            for r in relatorio if r.get("escolhidas")
+        ]
+        if novos_alunos:
+            self.origem.set("fotos")
+            self._atualizar_origem()
+            self._preencher_texto(novos_alunos, self.curso_todos.get().strip())
+        else:
+            self.ler_fotos()
+
+        if hasattr(self, "aba_fotos"):
+            self.aba_fotos.atualizar_lista(silencioso=True)
+            self.aba_fotos.agendar_revisao()
+
+        self.status.set(
+            f"Concluído! Melhores fotos escolhidas e copiadas para {ok_count} formando(s). Veja ou troque na aba Revisão e Recorte."
+        )
 
     def _preencher_texto(self, alunos, curso=""):
 
@@ -1963,6 +2073,22 @@ class AbaFotos:
             acoes_foto, text="Restaurar Foto Original", command=self.restaurar
         )
         self.botao_restaurar.pack(fill="x", pady=(4, 0))
+
+        quadro_opcoes = ttk.LabelFrame(
+            quadro_recorte, text="Outras fotos da pasta (Troca 1 Clique)", padding=4
+        )
+        quadro_opcoes.pack(fill="x", pady=(8, 0))
+        self.opcao_foto_var = tk.StringVar(value="")
+        self._opcoes_atuais_lista = []
+        self.combo_opcoes_foto = ttk.Combobox(
+            quadro_opcoes, textvariable=self.opcao_foto_var, state="disabled", width=28
+        )
+        self.combo_opcoes_foto.pack(fill="x")
+        self.combo_opcoes_foto.bind("<<ComboboxSelected>>", lambda e: self._trocar_por_opcao_selecionada())
+        self.botao_trocar_opcao = ttk.Button(
+            quadro_opcoes, text="Trocar por esta Foto", command=self._trocar_por_opcao_selecionada, state="disabled"
+        )
+        self.botao_trocar_opcao.pack(fill="x", pady=(4, 0))
 
         ttk.Label(quadro_recorte, textvariable=self.foto_revisao_atual, style="Dica.TLabel", wraplength=250).pack(
             anchor="w", pady=(8, 0)
@@ -3310,7 +3436,72 @@ class AbaFotos:
         self._sincronizar_zoom()
         self._desenhar()
         self._agendar_previa()
+        self._atualizar_opcoes_foto_aluno()
         self.tela.focus_set()
+
+    def _atualizar_opcoes_foto_aluno(self):
+        """Preenche a caixa de Troca Rápida com as melhores fotos avaliadas da subpasta deste formando."""
+
+        self._opcoes_atuais_lista = []
+        if not self.arquivo or not self.rf or not hasattr(self.rf, "ler_opcoes_foto"):
+            self.opcao_foto_var.set("")
+            self.combo_opcoes_foto.configure(values=[], state="disabled")
+            self.botao_trocar_opcao.configure(state="disabled")
+            return
+
+        nome_aluno = self.rf.nome_do_aluno(self.arquivo)
+        tam = self.tam.get()
+        chave_op = f"{self.rf.chave(nome_aluno)}|{tam}"
+        dados_op = self.rf.ler_opcoes_foto().get(chave_op)
+        candidatas = (dados_op or {}).get("candidatas") or []
+        if not candidatas:
+            self.opcao_foto_var.set("Use 'Escolher Melhores Fotos'")
+            self.combo_opcoes_foto.configure(values=[], state="disabled")
+            self.botao_trocar_opcao.configure(state="disabled")
+            return
+
+        escolhida_atual = str((dados_op or {}).get("escolhida") or "")
+        rotulos = []
+        indice_atual = 0
+        for idx, cand in enumerate(candidatas):
+            rotulo = f"{idx + 1}ª ({cand.get('nota', 0)} pts) {cand.get('nome_arquivo', '')} — {cand.get('resumo', '')}"
+            rotulos.append(rotulo)
+            self._opcoes_atuais_lista.append(cand)
+            if str(cand.get("caminho", "")) == escolhida_atual:
+                indice_atual = idx
+
+        self.combo_opcoes_foto.configure(values=rotulos, state="readonly")
+        self.combo_opcoes_foto.current(indice_atual)
+        self.botao_trocar_opcao.configure(state="normal")
+
+    def _trocar_por_opcao_selecionada(self):
+        """Substitui a foto atual do formando pela foto candidata escolhida na lista de Troca Rápida."""
+
+        if not self.arquivo or not self._opcoes_atuais_lista or self.ocupado:
+            return
+        idx = self.combo_opcoes_foto.current()
+        if idx < 0 or idx >= len(self._opcoes_atuais_lista):
+            return
+        cand = self._opcoes_atuais_lista[idx]
+        caminho_origem = cand.get("caminho")
+        if not caminho_origem:
+            return
+
+        rf = self._modulo()
+        nome_aluno = rf.nome_do_aluno(self.arquivo)
+        tam = self.tam.get()
+        try:
+            destino = rf.trocar_foto_por_opcao(nome_aluno, tam, caminho_origem, self.cfg)
+        except Exception as e:
+            self.status_revisao.set("Não foi possível trocar pela foto candidata: " + str(e))
+            return
+
+        self.status_revisao.set(
+            f"Foto de {nome_aluno} ({tam}) trocada para {cand.get('nome_arquivo')} ({cand.get('nota')} pts — {cand.get('resumo')})!"
+        )
+        self.abrir(destino)
+        if self._aluno_nome:
+            self._selecionar_aluno_revisao()
 
     # --------------------------------------------------------
     # Geometria

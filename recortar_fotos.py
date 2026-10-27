@@ -538,6 +538,462 @@ def detectar_rosto(img):
     return None
 
 
+OPCOES_FOTO_FILE = PASTA / "opcoes_por_foto.json"
+
+
+def ler_opcoes_foto():
+    if OPCOES_FOTO_FILE.is_file():
+        try:
+            dados = json.loads(OPCOES_FOTO_FILE.read_text(encoding="utf-8"))
+            if isinstance(dados, dict):
+                return dados
+        except Exception:
+            pass
+    return {}
+
+
+def gravar_opcoes_foto(dados):
+    try:
+        temp = OPCOES_FOTO_FILE.with_suffix(".tmp")
+        temp.write_text(json.dumps(dados, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, OPCOES_FOTO_FILE)
+    except Exception:
+        pass
+
+
+def nome_arquivo_destino_foto(nome_aluno, tam):
+    """Nome padrão na pasta FOTO compatível com AUTOMAÇAO-PASTA.py e recortar_fotos.py."""
+    limpo = formatar_nome(nome_aluno)
+    if str(tam).upper() in ("20X20", "24X34"):
+        return f"{limpo} {str(tam).upper()}.jpg"
+    return f"{limpo}.jpg"
+
+
+def tamanhos_do_plano(plano, berlim_modo="Ambos"):
+    """Devolve a lista de tamanhos de foto exigidos pelo plano (ex.: ['30X20'], ['20X20'], ['24X34', '20X20'])."""
+    p = chave(plano or "")
+    if any(k in p for k in ("berlim", "berlin", "24x34", "34x24", "diamond", "diamante")):
+        modo = chave(berlim_modo or "ambos")
+        if "24x34" in modo:
+            return ["24X34"]
+        if "20x20" in modo:
+            return ["20X20"]
+        return ["24X34", "20X20"]
+    if "20x20" in p or "essencial" in p:
+        return ["20X20"]
+    return ["30X20"]
+
+
+def detectar_todos_rostos(img):
+    """
+    Detecta todos os rostos na imagem usando YuNet ONNX (com fallback Haar).
+    Retorna lista ordenada do maior para o menor rosto:
+    [{x, y, w, h, cx, olhos_y, olho_d, olho_e, nariz, boca_d, boca_e, score, metodo}]
+    """
+    w, h = img.size
+    escala = min(1.0, LADO_DETECCAO / max(w, h))
+    pequena = img.convert("RGB")
+    if escala < 1.0:
+        pequena = pequena.resize((round(w * escala), round(h * escala)), Image.BILINEAR)
+
+    bgr = cv2.cvtColor(np.asarray(pequena), cv2.COLOR_RGB2BGR)
+    ph, pw = bgr.shape[:2]
+
+    det = detector_yunet()
+    det.setInputSize((pw, ph))
+    _, faces = det.detect(bgr)
+
+    resultado = []
+    if faces is not None and len(faces):
+        for f in faces:
+            score = float(f[14]) if len(f) > 14 else 0.85
+            if score < 0.62:
+                continue
+            x, y, fw, fh = (float(v) / escala for v in f[:4])
+            olho_d = (float(f[4]) / escala, float(f[5]) / escala)
+            olho_e = (float(f[6]) / escala, float(f[7]) / escala)
+            nariz = (float(f[8]) / escala, float(f[9]) / escala)
+            boca_d = (float(f[10]) / escala, float(f[11]) / escala)
+            boca_e = (float(f[12]) / escala, float(f[13]) / escala)
+            resultado.append({
+                "x": x, "y": y, "w": fw, "h": fh,
+                "cx": x + fw / 2.0,
+                "olhos_y": (olho_d[1] + olho_e[1]) / 2.0,
+                "olho_d": olho_d,
+                "olho_e": olho_e,
+                "nariz": nariz,
+                "boca_d": boca_d,
+                "boca_e": boca_e,
+                "score": score,
+                "metodo": "yunet",
+            })
+        resultado.sort(key=lambda r: r["w"] * r["h"], reverse=True)
+        if resultado:
+            return resultado
+
+    r_unico = detectar_rosto(img)
+    return [r_unico] if r_unico else []
+
+
+def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2):
+    """
+    Avalia uma foto candidata para um tamanho de capa ('20X20', '30X20', '24X34') segundo 6 critérios:
+      1. Pessoa sozinha na foto (até 25 pts; penaliza fotos em grupo)
+      2. Orientação ideal + Encaixe pós-corte (até 30 pts: 8 pts orientação + 22 pts encaixe pós-corte;
+         se não houver foto na orientação ideal, vence a que depois do corte melhor se encaixa)
+      3. Nitidez no rosto / Não embaçada (até 15 pts via variância do Laplaciano)
+      4. Resolução útil pós-corte 300 DPI (até 15 pts)
+      5. Rosto de frente olhando para a câmera (até 8 pts via simetria dos pontos faciais)
+      6. Boa iluminação no rosto sem sombra dura ou estouro (até 7 pts)
+    """
+    caminho_p = Path(caminho)
+    img, _, _ = abrir_foto(caminho_p)
+    W, H = img.size
+    mw, mh = molde
+    orientacao_foto = "Vertical" if H > W * 1.05 else ("Horizontal" if W > H * 1.05 else "Quadrada")
+
+    rostos = detectar_todos_rostos(img)
+    if not rostos:
+        caixa_fallback = ajustar_caixa((0, 0, W, H), (W, H), molde)
+        return {
+            "caminho": str(caminho_p),
+            "nome_arquivo": caminho_p.name,
+            "tamanho": tam,
+            "valida": False,
+            "nota": 5.0,
+            "qtd_pessoas": 0,
+            "orientacao": orientacao_foto,
+            "orientacao_ideal": False,
+            "encaixe_pct": 0,
+            "nitidez": 0.0,
+            "embacada": True,
+            "ampliacao": round(ampliacao_da_caixa(caixa_fallback, molde), 2),
+            "caixa": list(caixa_fallback),
+            "resumo": "Sem rosto detectado",
+        }
+
+    rosto = rostos[0]
+    area_principal = max(1.0, rosto["w"] * rosto["h"])
+    rostos_relevantes = [r for r in rostos if (r["w"] * r["h"]) >= area_principal * 0.18]
+    qtd_pessoas = len(rostos_relevantes)
+
+    # Caixa ideal (sem travar nas bordas da foto) vs Caixa real pós-corte
+    calib_uso = calib or CALIBRACAO_PADRAO
+    crop_h_ideal = rosto["h"] / max(0.05, calib_uso.get("altura_rosto", 0.16))
+    crop_w_ideal = crop_h_ideal * mw / mh
+    left_ideal = rosto["cx"] - calib_uso.get("centro_x", 0.5) * crop_w_ideal
+    top_ideal = rosto["olhos_y"] - calib_uso.get("olhos_y", 0.38) * crop_h_ideal
+    right_ideal = left_ideal + crop_w_ideal
+    bottom_ideal = top_ideal + crop_h_ideal
+
+    caixa = calcular_recorte((W, H), rosto, molde, calib_uso)
+    cl, ct, cr, cb = caixa
+    cw, ch = max(1.0, float(cr - cl)), max(1.0, float(cb - ct))
+
+    # 1. Critério: Pessoa sozinha na foto (até 25 pts)
+    if qtd_pessoas == 1:
+        pts_sozinha = 25.0
+        tag_pessoas = "Sozinha"
+    else:
+        # Verifica se algum outro rosto cai dentro da caixa de corte
+        outros_no_corte = 0
+        for r_sec in rostos_relevantes[1:]:
+            if (r_sec["cx"] >= cl and r_sec["cx"] <= cr and r_sec["olhos_y"] >= ct and r_sec["olhos_y"] <= cb):
+                outros_no_corte += 1
+        if outros_no_corte > 0:
+            pts_sozinha = max(-20.0, 5.0 - 15.0 * outros_no_corte)
+            tag_pessoas = f"{qtd_pessoas} pessoas (no corte)"
+        else:
+            pts_sozinha = 10.0
+            tag_pessoas = f"{qtd_pessoas} pessoas (fora do corte)"
+
+    # 2. Critério: Orientação Ideal + Encaixe Pós-Corte (até 30 pts)
+    # Para 24X34 e 30X20 (ou molde onde mh >= mw), vertical é preferida; para 20X20 aceita quadrada/vertical/horizontal
+    if tam in ("24X34", "30X20"):
+        orientacao_ideal = H >= W * 0.95
+    else:
+        orientacao_ideal = (0.75 <= (W / max(1.0, H)) <= 1.38) or (H >= W)
+    pts_orientacao = 8.0 if orientacao_ideal else 0.0
+
+    # Mede o quanto o corte real conseguiu preservar a caixa ideal e o alinhamento dos olhos/cabeça/ombros
+    escala_preservada = min(1.0, ch / max(1.0, crop_h_ideal))
+    olhos_y_pos_corte = (rosto["olhos_y"] - ct) / ch
+    centro_x_pos_corte = (rosto["cx"] - cl) / cw
+    erro_olhos = abs(olhos_y_pos_corte - calib_uso.get("olhos_y", 0.38))
+    erro_centro = abs(centro_x_pos_corte - calib_uso.get("centro_x", 0.5))
+
+    # Folga acima da cabeça (capelo/cabelo) e abaixo do queixo/ombros dentro do corte
+    topo_cabeca_y = rosto["y"] - 0.32 * rosto["h"]
+    base_ombros_y = rosto["y"] + 1.50 * rosto["h"]
+    folga_cabeca_ok = 1.0 if topo_cabeca_y >= ct else max(0.0, 1.0 - (ct - topo_cabeca_y) / max(1.0, rosto["h"]))
+    folga_ombros_ok = 1.0 if base_ombros_y <= cb else max(0.0, 1.0 - (base_ombros_y - cb) / max(1.0, rosto["h"]))
+
+    alinhamento_olhos = max(0.0, 1.0 - erro_olhos * 3.2)
+    alinhamento_centro = max(0.0, 1.0 - erro_centro * 2.5)
+    encaixe_ratio = (
+        0.40 * escala_preservada
+        + 0.28 * alinhamento_olhos
+        + 0.14 * alinhamento_centro
+        + 0.10 * folga_cabeca_ok
+        + 0.08 * folga_ombros_ok
+    )
+    encaixe_pct = int(round(max(0.0, min(1.0, encaixe_ratio)) * 100))
+    pts_encaixe = round(22.0 * max(0.0, min(1.0, encaixe_ratio)), 1)
+
+    # 3. Critério: Nitidez no rosto / Não embaçada (até 15 pts)
+    fx0 = int(max(0, round(rosto["x"])))
+    fy0 = int(max(0, round(rosto["y"])))
+    fx1 = int(min(W, round(rosto["x"] + rosto["w"])))
+    fy1 = int(min(H, round(rosto["y"] + rosto["h"])))
+    recorte_rosto = img.crop((fx0, fy0, max(fx0 + 10, fx1), max(fy0 + 10, fy1))).convert("L").resize((200, 200), Image.BILINEAR)
+    arr_rosto = np.asarray(recorte_rosto, dtype=np.uint8)
+    var_lap = float(cv2.Laplacian(arr_rosto, cv2.CV_64F).var())
+    embacada = var_lap < 42.0
+    if var_lap >= 135.0:
+        pts_nitidez = 15.0
+    elif var_lap >= 42.0:
+        pts_nitidez = round(6.0 + 9.0 * ((var_lap - 42.0) / (135.0 - 42.0)), 1)
+    else:
+        pts_nitidez = round(max(0.0, 5.0 * (var_lap / 42.0)), 1)
+
+    # 4. Critério: Resolução útil pós-corte 300 DPI (até 15 pts)
+    amp = ampliacao_da_caixa(caixa, molde)
+    if amp <= 1.0:
+        pts_resolucao = 15.0
+    elif amp <= ampliacao_maxima:
+        pts_resolucao = round(15.0 - 6.0 * ((amp - 1.0) / max(0.05, ampliacao_maxima - 1.0)), 1)
+    else:
+        pts_resolucao = round(max(0.0, 7.0 - 14.0 * (amp - ampliacao_maxima)), 1)
+
+    # 5. Critério: Rosto bem de frente olhando para a câmera (até 8 pts)
+    pts_frente = 6.0
+    if "olho_d" in rosto and "olho_e" in rosto and "nariz" in rosto:
+        od, oe, nar = rosto["olho_d"], rosto["olho_e"], rosto["nariz"]
+        dist_olhos = max(1.0, math.hypot(oe[0] - od[0], oe[1] - od[1]))
+        meio_x = (od[0] + oe[0]) / 2.0
+        assimetria_yaw = abs(nar[0] - meio_x) / dist_olhos
+        inclinacao_roll = abs(oe[1] - od[1]) / dist_olhos
+        fator_frente = max(0.0, 1.0 - max(0.0, assimetria_yaw - 0.04) * 2.5 - max(0.0, inclinacao_roll - 0.04) * 2.0)
+        pts_frente = round(8.0 * min(1.0, fator_frente), 1)
+
+    # 6. Critério: Boa iluminação no rosto (até 7 pts)
+    brilho_medio = float(arr_rosto.mean())
+    frac_sombra = float((arr_rosto < 28).mean())
+    frac_estouro = float((arr_rosto > 246).mean())
+    penalidade_luz = 0.0
+    if brilho_medio < 95:
+        penalidade_luz += (95 - brilho_medio) / 30.0
+    elif brilho_medio > 205:
+        penalidade_luz += (brilho_medio - 205) / 25.0
+    penalidade_luz += max(0.0, frac_sombra - 0.08) * 12.0 + max(0.0, frac_estouro - 0.04) * 15.0
+    pts_luz = round(max(0.0, 7.0 - penalidade_luz), 1)
+
+    nota_total = round(max(1.0, min(100.0, pts_sozinha + pts_orientacao + pts_encaixe + pts_nitidez + pts_resolucao + pts_frente + pts_luz)), 1)
+
+    partes_resumo = [
+        tag_pessoas,
+        "Nítida" if not embacada else "Embaçada",
+        f"Encaixe {encaixe_pct}%",
+        orientacao_foto + ("" if orientacao_ideal else " (adaptada no corte)"),
+    ]
+    return {
+        "caminho": str(caminho_p),
+        "nome_arquivo": caminho_p.name,
+        "tamanho": tam,
+        "valida": True,
+        "nota": nota_total,
+        "qtd_pessoas": qtd_pessoas,
+        "orientacao": orientacao_foto,
+        "orientacao_ideal": orientacao_ideal,
+        "encaixe_pct": encaixe_pct,
+        "nitidez": round(var_lap, 1),
+        "embacada": embacada,
+        "ampliacao": round(amp, 2),
+        "caixa": list(caixa),
+        "resumo": " · ".join(partes_resumo),
+    }
+
+
+def _listar_imagens_subpasta(pasta_aluno):
+    """Lista todas as fotos de uma subpasta de formando (incluindo subníveis se houver, ignorando _ORIGINAIS)."""
+    arquivos = []
+    for raiz, dirs, files in os.walk(pasta_aluno):
+        dirs[:] = [d for d in dirs if not d.startswith("_") and not d.startswith(".")]
+        for nome in sorted(files):
+            if nome.startswith("._"):
+                continue
+            p = Path(raiz) / nome
+            if p.suffix.lower() in EXTENSOES:
+                arquivos.append(p)
+    return arquivos
+
+
+def escolher_melhores_fotos_subpastas(
+    pasta_subpastas,
+    cfg,
+    calib=None,
+    alunos_planos=None,
+    plano_padrao="Prime Book 30X20",
+    curso_padrao="",
+    berlim_modo="Ambos",
+    progresso_cb=None,
+):
+    """
+    Percorre uma pasta principal onde cada subpasta pertence a um formando,
+    avalia todas as fotos da subpasta segundo os critérios (pessoa sozinha,
+    orientação + melhor encaixe pós-corte, nitidez/não embaçada, rosto de frente,
+    iluminação e resolução), copia a foto campeã de cada tamanho exigido pelo
+    plano para a pasta FOTO e salva as Top 5 opções em opcoes_por_foto.json.
+    """
+    pasta_mae = Path(pasta_subpastas)
+    if not pasta_mae.is_dir():
+        raise FileNotFoundError("Pasta de subpastas dos formandos não encontrada: " + str(pasta_mae))
+
+    if calib is None:
+        calib = carregar_calibracao(cfg)
+
+    cfg["fotos"].mkdir(parents=True, exist_ok=True)
+    subpastas = sorted([d for d in pasta_mae.iterdir() if d.is_dir() and not d.name.startswith(("_", "."))], key=lambda d: chave(d.name))
+    if not subpastas:
+        # Se o usuário apontou uma pasta que tem fotos diretas sem subpastas, agrupa por nome_do_aluno
+        subpastas = [pasta_mae]
+
+    mapa_planos = {}
+    mapa_cursos = {}
+    if alunos_planos:
+        for item in alunos_planos:
+            ch = chave(item.get("nome", ""))
+            if ch:
+                mapa_planos[ch] = item.get("plano") or plano_padrao
+                if item.get("curso"):
+                    mapa_cursos[ch] = item["curso"]
+
+    _, cursos_salvos_nome = _cursos_salvos_por_foto()
+    opcoes_salvas = ler_opcoes_foto()
+    relatorio_alunos = []
+    total_sub = len(subpastas)
+
+    for idx_sub, sub in enumerate(subpastas, 1):
+        nome_aluno = formatar_nome(sub.name) if sub != pasta_mae else formatar_nome(pasta_mae.name)
+        ch_aluno = chave(nome_aluno)
+        plano_aluno = mapa_planos.get(ch_aluno) or plano_padrao
+        curso_aluno = mapa_cursos.get(ch_aluno) or cursos_salvos_nome.get(ch_aluno) or curso_padrao
+        tamanhos_necessarios = tamanhos_do_plano(plano_aluno, berlim_modo)
+
+        fotos_candidatas = _listar_imagens_subpasta(sub)
+        if progresso_cb:
+            progresso_cb(idx_sub, total_sub, f"Analisando {nome_aluno} ({len(fotos_candidatas)} foto(s))...")
+
+        if not fotos_candidatas:
+            relatorio_alunos.append({
+                "nome": nome_aluno,
+                "curso": curso_aluno,
+                "plano": plano_aluno,
+                "status": "SEM_FOTOS",
+                "escolhidas": {},
+            })
+            continue
+
+        escolhidas_aluno = {}
+        for tam in tamanhos_necessarios:
+            molde = cfg["moldes"].get(tam, MOLDES_PADRAO.get(tam, (3874, 3012)))
+            calib_tam = calib.get(tam, CALIBRACAO_PADRAO)
+
+            avaliacoes = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, max(2, os.cpu_count() or 4))) as pool:
+                futuros = {
+                    pool.submit(
+                        avaliar_foto_para_molde,
+                        arq,
+                        tam,
+                        molde,
+                        calib_tam,
+                        cfg.get("ampliacao_maxima", 1.2),
+                    ): arq
+                    for arq in fotos_candidatas
+                }
+                for fut in concurrent.futures.as_completed(futuros):
+                    try:
+                        avaliacoes.append(fut.result())
+                    except Exception:
+                        pass
+
+            if not avaliacoes:
+                continue
+
+            # Ordena priorizando:
+            # 1) Foto com rosto válido
+            # 2) Pessoa sozinha na foto (qtd_pessoas == 1)
+            # 3) Maior nota combinada (Orientação + Encaixe Pós-Corte + Nitidez + Rosto de Frente + Luz + Resolução)
+            avaliacoes.sort(
+                key=lambda a: (
+                    1 if a.get("valida") else 0,
+                    1 if a.get("qtd_pessoas") == 1 else (0 if a.get("qtd_pessoas", 0) > 1 else -1),
+                    float(a.get("nota", 0.0)),
+                    int(a.get("encaixe_pct", 0)),
+                ),
+                reverse=True,
+            )
+
+            campea = avaliacoes[0]
+            nome_dest = nome_arquivo_destino_foto(nome_aluno, tam)
+            destino = cfg["fotos"] / nome_dest
+
+            # Copia a melhor foto já convertida em JPEG de alta qualidade para a pasta FOTO
+            origem_campea = Path(campea["caminho"])
+            img_campea, icc_c, dpi_c = abrir_foto(origem_campea)
+            salvar_jpg(img_campea.convert("RGB"), destino, icc_c, dpi_c or DPI_MOLDE)
+            # Limpa eventual caixa manual antiga pois a foto base mudou
+            apagar_manual(destino)
+
+            chave_op = f"{ch_aluno}|{tam}"
+            opcoes_salvas[chave_op] = {
+                "nome": nome_aluno,
+                "tamanho": tam,
+                "arquivo_destino": str(destino),
+                "escolhida": campea["caminho"],
+                "candidatas": avaliacoes[:6],
+            }
+            escolhidas_aluno[tam] = campea
+
+        relatorio_alunos.append({
+            "nome": nome_aluno,
+            "curso": curso_aluno,
+            "plano": plano_aluno,
+            "status": "OK" if escolhidas_aluno else "ERRO",
+            "escolhidas": escolhidas_aluno,
+        })
+
+    gravar_opcoes_foto(opcoes_salvas)
+    return relatorio_alunos
+
+
+def trocar_foto_por_opcao(nome_aluno, tam, caminho_origem, cfg):
+    """Substitui na pasta FOTO a foto do aluno pela candidata escolhida na troca rápida da Revisão."""
+    origem = Path(caminho_origem)
+    if not origem.is_file():
+        raise FileNotFoundError("Foto candidata não encontrada: " + str(origem))
+    nome_dest = nome_arquivo_destino_foto(nome_aluno, tam)
+    destino = cfg["fotos"] / nome_dest
+    # Também atualiza em _ORIGINAIS se já havia backup dessa foto
+    bkp = backup_de(destino, cfg)
+    if bkp and bkp.is_file():
+        try:
+            bkp.unlink()
+        except OSError:
+            pass
+    img, icc, dpi = abrir_foto(origem)
+    salvar_jpg(img.convert("RGB"), destino, icc, dpi or DPI_MOLDE)
+    apagar_manual(destino)
+
+    opcoes = ler_opcoes_foto()
+    chave_op = f"{chave(nome_aluno)}|{tam}"
+    if chave_op in opcoes:
+        opcoes[chave_op]["escolhida"] = str(origem)
+        gravar_opcoes_foto(opcoes)
+    return destino
+
+
 def abrir_foto(caminho):
     img = Image.open(caminho)
     icc = img.info.get("icc_profile")
