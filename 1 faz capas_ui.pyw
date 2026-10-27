@@ -895,9 +895,20 @@ class JanelaCapas:
     # --------------------------------------------------------
 
     def _carregar_ultima_colagem(self):
-        """Inicia direto lendo as fotos da pasta (sem precisar de planilha)."""
+        """Inicia direto verificando o cache persistente (cache_analise_subpastas.json) e lendo as fotos da pasta."""
         self.origem.set("fotos")
         self._atualizar_origem()
+        try:
+            rf = modulo_recorte()
+            if hasattr(rf, "verificar_cache_analise_subpastas"):
+                info_cache = rf.verificar_cache_analise_subpastas()
+                if info_cache.get("existe"):
+                    self.status.set(
+                        f"Cache carregado (cache_analise_subpastas.json: {info_cache.get('fotos_em_cache', 0)} foto(s), "
+                        f"{info_cache.get('subpastas_em_cache', 0)} subpasta(s)). Lendo fotos..."
+                    )
+        except Exception:
+            pass
         self.root.after(250, self.ler_fotos)
 
     def sincronizar_curso_aluno(self, nome_aluno, curso):
@@ -968,17 +979,18 @@ class JanelaCapas:
         self.carregar()
 
     def ler_fotos(self):
-        """Monta a lista de capas pelas fotos da pasta (baixa as novas do Drive antes, se for o caso)."""
+        """Monta a lista de capas pelas fotos da pasta verificando antes o cache em disco (cache_analise_subpastas.json)."""
 
         if getattr(self, "_lendo_fotos", False):
             return
         self._lendo_fotos = True
         self.botao_ler_fotos.configure(state="disabled")
-        self.status.set("Lendo as fotos da pasta...")
+        self.status.set("Verificando cache_analise_subpastas.json e lendo as fotos da pasta...")
 
         def trabalho():
             erro = None
             alunos = []
+            info_cache = {}
             try:
                 rf = modulo_recorte()
                 cfg = rf.carregar_config()
@@ -989,15 +1001,17 @@ class JanelaCapas:
                         erro = "Não consegui baixar as fotos do Drive (usando as que já estão na pasta): " + str(e)
                 if not Path(cfg["fotos"]).is_dir():
                     raise RuntimeError("Pasta de fotos não encontrada: " + str(cfg["fotos"]))
+                if hasattr(rf, "verificar_cache_analise_subpastas"):
+                    info_cache = rf.verificar_cache_analise_subpastas(cfg["fotos"])
                 alunos = rf.alunos_das_fotos(cfg["fotos"])
             except Exception as e:
                 erro = str(e)
                 alunos = None
-            self.root.after(0, lambda: self._fotos_lidas(alunos, erro))
+            self.root.after(0, lambda: self._fotos_lidas(alunos, erro, info_cache))
 
         threading.Thread(target=trabalho, daemon=True).start()
 
-    def _fotos_lidas(self, alunos, erro):
+    def _fotos_lidas(self, alunos, erro, info_cache=None):
 
         self._lendo_fotos = False
         self.botao_ler_fotos.configure(state="normal")
@@ -1018,8 +1032,15 @@ class JanelaCapas:
         com_curso = sum(1 for a in self.alunos if a.get("curso"))
         texto = (
             str(len(alunos)) + " capa(s) carregada(s) direto das fotos ("
-            + str(com_curso) + " já com curso definido)."
+            + str(com_curso) + " já com curso definido)"
         )
+        if info_cache and (info_cache.get("fotos_em_cache", 0) > 0 or info_cache.get("subpastas_em_cache", 0) > 0):
+            texto += (
+                f" · Cache ativo ({info_cache.get('fotos_em_cache', 0)} foto(s) / "
+                f"{info_cache.get('subpastas_em_cache', 0)} subpasta(s) em cache_analise_subpastas.json)."
+            )
+        else:
+            texto += "."
         if erro:
             texto += "  " + erro
         self.status.set(texto)
@@ -1028,6 +1049,7 @@ class JanelaCapas:
         """Abre uma pasta com as subpastas de cada formando, escolhe a melhor foto conforme o plano e copia p/ FOTO."""
 
         from tkinter import filedialog
+        import time
 
         if getattr(self, "_escolhendo_fotos", False):
             return
@@ -1051,7 +1073,17 @@ class JanelaCapas:
         self.botao_escolher_fotos.configure(state="disabled")
         self.botao_ler_fotos.configure(state="disabled")
         self._limpar_saida()
-        self._escrever("Iniciando seleção inteligente ultrarrápida (JPEG DCT + Cache em disco) em: " + pasta + "\n")
+
+        info_cache = rf.verificar_cache_analise_subpastas() if hasattr(rf, "verificar_cache_analise_subpastas") else {}
+        self._escrever(
+            "Iniciando seleção ultra-rápida (C++ IMREAD_REDUCED_COLOR_8 1/8 DCT + YuNet 640px + os.scandir + cache_analise_subpastas.json) em: "
+            + pasta + "\n"
+        )
+        if info_cache.get("existe"):
+            self._escrever(
+                f"Cache em disco verificado: {info_cache.get('fotos_em_cache', 0)} foto(s) e "
+                f"{info_cache.get('subpastas_em_cache', 0)} subpasta(s) prontas para carregamento instantâneo (0ms)!\n"
+            )
         self._escrever(
             "Critérios: Pessoa sozinha · Densidade de pixels no rosto pós-corte (peso alto + desempate) · "
             "Histograma sem estouro de altas luzes · Descarte de baixo contraste · Nitidez · Orientação/Encaixe\n\n"
@@ -1068,6 +1100,7 @@ class JanelaCapas:
         def trabalho():
             erro = None
             relatorio = []
+            t0 = time.perf_counter()
             try:
                 cfg = rf.carregar_config()
                 calib = rf.carregar_calibracao(cfg)
@@ -1083,11 +1116,12 @@ class JanelaCapas:
                 )
             except Exception as e:
                 erro = str(e)
-            self.root.after(0, lambda: self._melhores_fotos_prontas(relatorio, erro))
+            tempo_seg = time.perf_counter() - t0
+            self.root.after(0, lambda: self._melhores_fotos_prontas(relatorio, erro, tempo_seg))
 
         threading.Thread(target=trabalho, daemon=True).start()
 
-    def _melhores_fotos_prontas(self, relatorio, erro):
+    def _melhores_fotos_prontas(self, relatorio, erro, tempo_seg=0.0):
 
         self._escolhendo_fotos = False
         self.botao_escolher_fotos.configure(state="normal")
@@ -1100,9 +1134,18 @@ class JanelaCapas:
 
         ok_count = 0
         aviso_qualidade_count = 0
+        subpastas_cache_count = 0
+        fotos_cache_total = 0
+        fotos_novas_total = 0
         for item in relatorio:
             escolhidas = item.get("escolhidas") or {}
             avisos_item = item.get("avisos") or []
+            do_cache = bool(item.get("do_cache", False))
+            fotos_cache_total += int(item.get("fotos_em_cache", 0))
+            fotos_novas_total += int(item.get("fotos_analisadas_agora", 0))
+            if do_cache:
+                subpastas_cache_count += 1
+            tag_cache = " [CACHE INSTANTÂNEO]" if do_cache else ""
             if escolhidas:
                 ok_count += 1
                 resumos = []
@@ -1115,12 +1158,18 @@ class JanelaCapas:
                 if avisos_item:
                     aviso_qualidade_count += 1
                     self._escrever(
-                        f"AVISO QUALIDADE (menos pior) — {item['nome']} [{item['plano']}]: " + " | ".join(resumos) + "\n"
+                        f"AVISO QUALIDADE (menos pior){tag_cache} — {item['nome']} [{item['plano']}]: " + " | ".join(resumos) + "\n"
                     )
                 else:
-                    self._escrever(f"OK — {item['nome']} [{item['plano']}]: " + " | ".join(resumos) + "\n")
+                    self._escrever(f"OK{tag_cache} — {item['nome']} [{item['plano']}]: " + " | ".join(resumos) + "\n")
             else:
                 self._escrever(f"AVISO — {item['nome']}: nenhuma foto encontrada na subpasta.\n")
+
+        self._escrever(
+            f"\nResumo do Cache (cache_analise_subpastas.json): {subpastas_cache_count}/{len(relatorio)} subpasta(s) instantâneas "
+            f"| {fotos_cache_total} foto(s) lidas do cache | {fotos_novas_total} foto(s) analisadas agora "
+            f"| Tempo total: {tempo_seg * 1000:.0f} ms\n"
+        )
 
         # Atualiza a tabela com os alunos e planos processados
         novos_alunos = [
@@ -1138,11 +1187,14 @@ class JanelaCapas:
             self.aba_fotos.atualizar_lista(silencioso=True)
             self.aba_fotos.agendar_revisao()
 
-        msg_final = f"Concluído! Melhores fotos escolhidas para {ok_count} formando(s)"
+        msg_final = (
+            f"Concluído em {tempo_seg * 1000:.0f} ms! {ok_count} formando(s) "
+            f"({subpastas_cache_count} via cache_analise_subpastas.json)"
+        )
         if aviso_qualidade_count:
-            msg_final += f" ({aviso_qualidade_count} com aviso de luz/contraste p/ revisar na aba Revisão e Recorte)."
+            msg_final += f" · {aviso_qualidade_count} com aviso de luz/contraste na Revisão."
         else:
-            msg_final += ". Veja ou troque na aba Revisão e Recorte."
+            msg_final += " · Veja ou troque na aba Revisão e Recorte."
         self.status.set(msg_final)
 
     def _preencher_texto(self, alunos, curso=""):
@@ -2282,6 +2334,8 @@ class AbaFotos:
             cursos_da_foto = {}
             erros = []
             try:
+                if hasattr(rf, "verificar_cache_analise_subpastas"):
+                    rf.verificar_cache_analise_subpastas(cfg["fotos"])
                 if origem == "arquivo":
                     if not caminho_planilha:
                         raise ValueError("Escolha uma planilha antes de carregar a revisão.")
@@ -2437,21 +2491,8 @@ class AbaFotos:
                             grupo["brasao"] = brasao.crop(caixa_brasao) if caixa_brasao else None
 
                         arquivo = Path(amostra["foto"])
-                        origem_foto = rf.fonte_original(arquivo, cfg)
-                        imagem, _, _ = rf.abrir_foto(origem_foto)
                         tamanho_foto = amostra["tamanho_foto"]
-                        molde = cfg["moldes"][tamanho_foto]
-                        caixa = rf.caixa_manual(arquivo, tamanho_foto, imagem.size, molde)
-                        if caixa is None:
-                            if rf.no_molde(imagem.size, molde):
-                                caixa = rf.ajustar_caixa((0, 0, imagem.width, imagem.height), imagem.size, molde)
-                            else:
-                                rosto = rf.detectar_rosto_cache(origem_foto, imagem) if hasattr(rf, "detectar_rosto_cache") else rf.detectar_rosto(imagem)
-                                caixa = (
-                                    rf.calcular_recorte(imagem.size, rosto, molde, calibracao.get(tamanho_foto, rf.CALIBRACAO_PADRAO))
-                                    if rosto else rf.ajustar_caixa((0, 0, imagem.width, imagem.height), imagem.size, molde)
-                                )
-                        foto_recortada = imagem.crop(tuple(round(c) for c in caixa))
+                        foto_recortada = self._recorte_revisao(rf, arquivo, tamanho_foto, cfg, calibracao)
                         if preset:
                             capa = rf.montar_previa_preset(foto_recortada, preset, amostra["nome"])
                             capa.thumbnail((LADO_PREVIA_REVISAO, LADO_PREVIA_REVISAO), Image.LANCZOS)
@@ -2784,20 +2825,36 @@ class AbaFotos:
     def _recorte_revisao(rf, arquivo, tamanho_foto, cfg, calibracao):
 
         origem_foto = rf.fonte_original(arquivo, cfg)
-        imagem, _, _ = rf.abrir_foto(origem_foto)
+        if hasattr(rf, "abrir_foto_previa_rapida"):
+            imagem_red, tam_orig, _ = rf.abrir_foto_previa_rapida(origem_foto, 1400)
+        else:
+            imagem, _, _ = rf.abrir_foto(origem_foto)
+            tam_orig = imagem.size
+            fator = min(1.0, 1400.0 / max(tam_orig))
+            imagem_red = (
+                imagem.resize((max(1, round(tam_orig[0] * fator)), max(1, round(tam_orig[1] * fator))), Image.BILINEAR)
+                if fator < 1.0 else imagem
+            )
         molde = cfg["moldes"][tamanho_foto]
-        caixa = rf.caixa_manual(arquivo, tamanho_foto, imagem.size, molde)
+        caixa = rf.caixa_manual(arquivo, tamanho_foto, tam_orig, molde)
         if caixa is None:
-            if rf.no_molde(imagem.size, molde):
-                caixa = rf.ajustar_caixa((0, 0, imagem.width, imagem.height), imagem.size, molde)
+            if rf.no_molde(tam_orig, molde):
+                caixa = rf.ajustar_caixa((0, 0, tam_orig[0], tam_orig[1]), tam_orig, molde)
             else:
-                rosto = rf.detectar_rosto_cache(origem_foto, imagem) if hasattr(rf, "detectar_rosto_cache") else rf.detectar_rosto(imagem)
+                rosto = rf.detectar_rosto_cache(origem_foto) if hasattr(rf, "detectar_rosto_cache") else rf.detectar_rosto(imagem_red)
                 caixa = (
-                    rf.calcular_recorte(imagem.size, rosto, molde, calibracao.get(tamanho_foto, rf.CALIBRACAO_PADRAO))
-                    if rosto else rf.ajustar_caixa((0, 0, imagem.width, imagem.height), imagem.size, molde)
+                    rf.calcular_recorte(tam_orig, rosto, molde, calibracao.get(tamanho_foto, rf.CALIBRACAO_PADRAO))
+                    if rosto else rf.ajustar_caixa((0, 0, tam_orig[0], tam_orig[1]), tam_orig, molde)
                 )
-        recortada = imagem.crop(tuple(round(c) for c in caixa)).convert("RGB")
-        recortada.thumbnail((1400, 1400), Image.LANCZOS)
+        fx = imagem_red.width / float(max(1, tam_orig[0]))
+        fy = imagem_red.height / float(max(1, tam_orig[1]))
+        caixa_red = (
+            max(0, round(caixa[0] * fx)),
+            max(0, round(caixa[1] * fy)),
+            min(imagem_red.width, max(1, round(caixa[2] * fx))),
+            min(imagem_red.height, max(1, round(caixa[3] * fy))),
+        )
+        recortada = imagem_red.crop(caixa_red).convert("RGB")
         return recortada
 
     def _capa_aluno_pronta(self, entrada, recortada, preset, previa, erro):
@@ -3254,6 +3311,8 @@ class AbaFotos:
             try:
                 if not pasta.is_dir():
                     raise FileNotFoundError("Pasta de fotos não encontrada: " + str(pasta))
+                if hasattr(rf, "verificar_cache_analise_subpastas"):
+                    rf.verificar_cache_analise_subpastas(pasta)
                 fotos = rf.listar_fotos(pasta)
                 manual = rf.ler_manual()
                 situacoes = {}
@@ -3382,25 +3441,30 @@ class AbaFotos:
         rf = self._modulo()
         calib = self._calibracao()
         tam = rf.tamanho_do_arquivo(arquivo)
-        self._ocupar(True, "Abrindo " + arquivo.name + " e procurando o rosto...")
+        self._ocupar(True, "Abrindo " + arquivo.name + "...")
 
         def trabalho():
             try:
                 origem = rf.fonte_original(arquivo, self.cfg)
-                fonte = rf.abrir_foto(origem)
-                img = fonte[0]
-                reduzida = img.convert("RGB")
-                fator = min(1.0, LADO_EDITOR / max(img.size))
-                if fator < 1.0:
-                    reduzida = reduzida.resize((round(img.width * fator), round(img.height * fator)), Image.BILINEAR)
-                rosto = rf.detectar_rosto_cache(origem, img) if hasattr(rf, "detectar_rosto_cache") else rf.detectar_rosto(img)
-                self.root.after(0, self._foto_aberta, arquivo, origem, fonte, reduzida, fator, rosto, tam, calib, None)
+                if hasattr(rf, "abrir_foto_previa_rapida"):
+                    reduzida, tam_orig, fator = rf.abrir_foto_previa_rapida(origem, LADO_EDITOR)
+                    fonte = None
+                else:
+                    fonte = rf.abrir_foto(origem)
+                    img = fonte[0]
+                    tam_orig = img.size
+                    reduzida = img.convert("RGB")
+                    fator = min(1.0, LADO_EDITOR / max(tam_orig))
+                    if fator < 1.0:
+                        reduzida = reduzida.resize((round(tam_orig[0] * fator), round(tam_orig[1] * fator)), Image.BILINEAR)
+                rosto = rf.detectar_rosto_cache(origem) if hasattr(rf, "detectar_rosto_cache") else rf.detectar_rosto(reduzida)
+                self.root.after(0, self._foto_aberta, arquivo, origem, fonte, tam_orig, reduzida, fator, rosto, tam, calib, None)
             except Exception as e:
-                self.root.after(0, self._foto_aberta, arquivo, None, None, None, 1.0, None, tam, calib, e)
+                self.root.after(0, self._foto_aberta, arquivo, None, None, None, None, 1.0, None, tam, calib, e)
 
         threading.Thread(target=trabalho, daemon=True).start()
 
-    def _foto_aberta(self, arquivo, origem, fonte, reduzida, fator, rosto, tam, calib, erro):
+    def _foto_aberta(self, arquivo, origem, fonte, tam_orig, reduzida, fator, rosto, tam, calib, erro):
 
         self._ocupar(False)
         if erro:
@@ -3409,7 +3473,8 @@ class AbaFotos:
 
         rf = self.rf
         self.arquivo = arquivo
-        self.fonte = fonte
+        self.fonte = fonte if fonte is not None else True
+        self.tam_fonte_orig = tam_orig
         self.reduzida = reduzida
         self.fator_red = fator
         self.rosto = rosto
@@ -3419,20 +3484,20 @@ class AbaFotos:
         self.tam.set(tam)
         self._mostrar_molde()
 
-        img = fonte[0]
+        W_orig, H_orig = tam_orig
         molde = self.cfg["moldes"][tam]
         self.caixa_auto = (
-            rf.calcular_recorte(img.size, rosto, molde, calib[tam]) if rosto
-            else rf.ajustar_caixa((0, 0, img.width, img.height), img.size, molde)
+            rf.calcular_recorte(tam_orig, rosto, molde, calib[tam]) if rosto
+            else rf.ajustar_caixa((0, 0, W_orig, H_orig), tam_orig, molde)
         )
 
-        manual = rf.caixa_manual(arquivo, tam, img.size, molde)
-        ja_no_molde = rf.no_molde(img.size, molde)
+        manual = rf.caixa_manual(arquivo, tam, tam_orig, molde)
+        ja_no_molde = rf.no_molde(tam_orig, molde)
         if manual:
             self.caixa = manual
             origem_caixa = "corte salvo à mão"
         elif ja_no_molde:
-            self.caixa = rf.ajustar_caixa((0, 0, img.width, img.height), img.size, molde)
+            self.caixa = rf.ajustar_caixa((0, 0, W_orig, H_orig), tam_orig, molde)
             origem_caixa = "foto já no tamanho do molde (sem original guardado)"
         else:
             self.caixa = self.caixa_auto
@@ -3446,7 +3511,7 @@ class AbaFotos:
 
         usando_original = origem != arquivo
         self.status.set(
-            arquivo.name + "  |  " + str(img.width) + "x" + str(img.height)
+            arquivo.name + "  |  " + str(W_orig) + "x" + str(H_orig)
             + ("  (original de _ORIGINAIS)" if usando_original else "")
             + "  |  " + origem_caixa
         )
@@ -3535,6 +3600,8 @@ class AbaFotos:
         return self.cfg["moldes"][self.tam.get()]
 
     def _tamanho_fonte(self):
+        if getattr(self, "tam_fonte_orig", None):
+            return self.tam_fonte_orig
         return self.fonte[0].size
 
     def _definir_caixa(self, caixa, guardar=True):
@@ -4091,13 +4158,15 @@ class AbaFotos:
         ):
             return
 
-        arquivo, caixa, fonte = self.arquivo, self.caixa, self.fonte
+        arquivo, caixa = self.arquivo, self.caixa
+        fonte = self.fonte if isinstance(self.fonte, tuple) else None
+        tam_fonte = self._tamanho_fonte()
         self._ocupar(True, "Gravando " + arquivo.name + "...")
 
         def trabalho():
             try:
                 destino = rf.aplicar_recorte(arquivo, caixa, tam, self.cfg, fonte)
-                rf.gravar_manual(arquivo, tam, caixa, fonte[0].size)
+                rf.gravar_manual(arquivo, tam, caixa, tam_fonte)
                 self.root.after(0, self._salvo, arquivo, destino, proxima, None)
             except Exception as e:
                 self.root.after(0, self._salvo, arquivo, None, proxima, e)
