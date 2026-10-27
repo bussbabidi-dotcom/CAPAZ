@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Janela da automação de capas.
 
@@ -1051,8 +1051,11 @@ class JanelaCapas:
         self.botao_escolher_fotos.configure(state="disabled")
         self.botao_ler_fotos.configure(state="disabled")
         self._limpar_saida()
-        self._escrever("Iniciando seleção inteligente das melhores fotos em: " + pasta + "\n")
-        self._escrever("Critérios: Pessoa sozinha · Nitidez (não embaçada) · Orientação + Melhor encaixe pós-corte · Rosto de frente · Iluminação · 300 DPI\n\n")
+        self._escrever("Iniciando seleção inteligente ultrarrápida (JPEG DCT + Cache em disco) em: " + pasta + "\n")
+        self._escrever(
+            "Critérios: Pessoa sozinha · Densidade de pixels no rosto pós-corte (peso alto + desempate) · "
+            "Histograma sem estouro de altas luzes · Descarte de baixo contraste · Nitidez · Orientação/Encaixe\n\n"
+        )
 
         alunos_atuais = list(self.carregar())
         plano_padrao = self.plano_todos.get().strip() or "Prime Book 30X20"
@@ -1096,15 +1099,26 @@ class JanelaCapas:
             return
 
         ok_count = 0
+        aviso_qualidade_count = 0
         for item in relatorio:
             escolhidas = item.get("escolhidas") or {}
+            avisos_item = item.get("avisos") or []
             if escolhidas:
                 ok_count += 1
-                resumos = [
-                    f"{tam}: {info['nome_arquivo']} ({info['nota']} pts — {info['resumo']})"
-                    for tam, info in escolhidas.items()
-                ]
-                self._escrever(f"OK — {item['nome']} [{item['plano']}]: " + " | ".join(resumos) + "\n")
+                resumos = []
+                for tam, info in escolhidas.items():
+                    av_rev = info.get("aviso_revisao") or ""
+                    sufixo_aviso = f" [AVISO: {av_rev}]" if av_rev else ""
+                    resumos.append(
+                        f"{tam}: {info['nome_arquivo']} ({info['nota']} pts — {info['resumo']}){sufixo_aviso}"
+                    )
+                if avisos_item:
+                    aviso_qualidade_count += 1
+                    self._escrever(
+                        f"AVISO QUALIDADE (menos pior) — {item['nome']} [{item['plano']}]: " + " | ".join(resumos) + "\n"
+                    )
+                else:
+                    self._escrever(f"OK — {item['nome']} [{item['plano']}]: " + " | ".join(resumos) + "\n")
             else:
                 self._escrever(f"AVISO — {item['nome']}: nenhuma foto encontrada na subpasta.\n")
 
@@ -1124,9 +1138,12 @@ class JanelaCapas:
             self.aba_fotos.atualizar_lista(silencioso=True)
             self.aba_fotos.agendar_revisao()
 
-        self.status.set(
-            f"Concluído! Melhores fotos escolhidas e copiadas para {ok_count} formando(s). Veja ou troque na aba Revisão e Recorte."
-        )
+        msg_final = f"Concluído! Melhores fotos escolhidas para {ok_count} formando(s)"
+        if aviso_qualidade_count:
+            msg_final += f" ({aviso_qualidade_count} com aviso de luz/contraste p/ revisar na aba Revisão e Recorte)."
+        else:
+            msg_final += ". Veja ou troque na aba Revisão e Recorte."
+        self.status.set(msg_final)
 
     def _preencher_texto(self, alunos, curso=""):
 
@@ -3443,6 +3460,7 @@ class AbaFotos:
         """Preenche a caixa de Troca Rápida com as melhores fotos avaliadas da subpasta deste formando."""
 
         self._opcoes_atuais_lista = []
+        self._aviso_opcoes_foto_atual = ""
         if not self.arquivo or not self.rf or not hasattr(self.rf, "ler_opcoes_foto"):
             self.opcao_foto_var.set("")
             self.combo_opcoes_foto.configure(values=[], state="disabled")
@@ -3460,11 +3478,16 @@ class AbaFotos:
             self.botao_trocar_opcao.configure(state="disabled")
             return
 
+        self._aviso_opcoes_foto_atual = str((dados_op or {}).get("aviso_revisao") or "")
         escolhida_atual = str((dados_op or {}).get("escolhida") or "")
         rotulos = []
         indice_atual = 0
         for idx, cand in enumerate(candidatas):
-            rotulo = f"{idx + 1}ª ({cand.get('nota', 0)} pts) {cand.get('nome_arquivo', '')} — {cand.get('resumo', '')}"
+            tag_aviso = " [AVISO]" if not cand.get("aprovada_qualidade", True) else ""
+            rotulo = (
+                f"{idx + 1}ª ({cand.get('nota', 0)} pts){tag_aviso} "
+                f"{cand.get('nome_arquivo', '')} — {cand.get('resumo', '')}"
+            )
             rotulos.append(rotulo)
             self._opcoes_atuais_lista.append(cand)
             if str(cand.get("caminho", "")) == escolhida_atual:
@@ -3473,6 +3496,7 @@ class AbaFotos:
         self.combo_opcoes_foto.configure(values=rotulos, state="readonly")
         self.combo_opcoes_foto.current(indice_atual)
         self.botao_trocar_opcao.configure(state="normal")
+        self._atualizar_info()
 
     def _trocar_por_opcao_selecionada(self):
         """Substitui a foto atual do formando pela foto candidata escolhida na lista de Troca Rápida."""
@@ -3845,6 +3869,8 @@ class AbaFotos:
             + "Escala: " + format(amp, ".0%") + ("  (ampliando)" if amp > 1 else "  (reduzindo)")
         )
         alertas = []
+        if getattr(self, "_aviso_opcoes_foto_atual", ""):
+            alertas.append("Aviso da seleção: " + self._aviso_opcoes_foto_atual)
         if amp > self.cfg["ampliacao_maxima"]:
             alertas.append("Resolução baixa: a foto vai ser ampliada " + format(amp, ".0%")
                            + " (limite " + format(self.cfg["ampliacao_maxima"], ".0%") + ").")
