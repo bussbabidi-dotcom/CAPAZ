@@ -2428,8 +2428,8 @@ SITUACAO_MANUAL = "ajustada à mão"
 SITUACAO_SEM_ROSTO = "sem rosto"
 SITUACAO_BAIXA = "resolução baixa"
 
-LADO_EDITOR = 1600
-LADO_PREVIA_REVISAO = 1400
+LADO_EDITOR = 2000
+LADO_PREVIA_REVISAO = 2000
 INTERVALO_VIGIA_MS = 2000
 ALCA_PX = 10
 
@@ -2499,6 +2499,7 @@ class AbaFotos:
         self._nome_editado = False
         self._revisao_grupo_por_iid = {}
         self._excluidos_revisao = set()
+        self._aprovados_revisao = set()
         self._cache_thumbs_7_opcoes = {}
         self._cache_recorte_revisao = {}
         self._token_selecao_aluno = 0
@@ -2677,18 +2678,19 @@ class AbaFotos:
         quadro_alunos.columnconfigure(0, weight=1)
         quadro_alunos.rowconfigure(1, weight=1)
         ttk.Checkbutton(
-            quadro_alunos, text="Só nomes com aviso (todos os cursos)",
+            quadro_alunos, text="Fila Inteligente: Só Pendências e Avisos",
             variable=self.so_nomes_aviso, command=self._preencher_alunos_revisao,
         ).grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.lista_alunos = ttk.Treeview(
             quadro_alunos, columns=("nome", "capa", "situacao"), show="headings", selectmode="browse",
         )
-        for coluna, titulo, largura in (("nome", "Aluno", 210), ("capa", "Capa", 54), ("situacao", "Nome", 110)):
+        for coluna, titulo, largura in (("nome", "Aluno", 210), ("capa", "Capa", 54), ("situacao", "Status", 110)):
             self.lista_alunos.heading(coluna, text=titulo)
             self.lista_alunos.column(coluna, width=largura, anchor="w")
         self.lista_alunos.tag_configure("nome_reduzido", background="#36352b", foreground=COR_AMARELO)
         self.lista_alunos.tag_configure("nome_estoura", background="#3b2a30", foreground="#e3a3aa")
         self.lista_alunos.tag_configure("nome_ajustado", foreground=COR_AZUL)
+        self.lista_alunos.tag_configure("aluno_aprovado", foreground=COR_VERDE)
         self.lista_alunos.grid(row=1, column=0, sticky="nsew")
         barra_alunos = ttk.Scrollbar(quadro_alunos, orient="vertical", command=self.lista_alunos.yview)
         barra_alunos.grid(row=1, column=1, sticky="ns")
@@ -2721,11 +2723,18 @@ class AbaFotos:
         self.combo_curso_direto.bind("<Return>", lambda e: self._definir_curso_direto())
 
         ttk.Button(
-            topo_curso, text="Gravar Curso", style="Primario.TButton", command=self._definir_curso_direto
+            topo_curso, text="Gravar Curso", command=self._definir_curso_direto
         ).pack(side="left", padx=(0, 6))
 
         ttk.Button(
             topo_curso, text="Aplicar nos Sem Curso", command=self._aplicar_curso_sem_curso
+        ).pack(side="left", padx=(0, 6))
+
+        ttk.Button(
+            topo_curso,
+            text="✓ Aprovar e Ir p/ Próximo Pendente (Enter)",
+            style="Primario.TButton",
+            command=self.aprovar_e_proximo_pendente,
         ).pack(side="left", padx=(0, 8))
 
         ttk.Checkbutton(
@@ -2861,11 +2870,18 @@ class AbaFotos:
 
         acoes_foto = ttk.Frame(quadro_recorte)
         acoes_foto.pack(fill="x", pady=(8, 0))
+        self.botao_aprovar_pendente = ttk.Button(
+            acoes_foto,
+            text="✓ Aprovar e Próximo Pendente (Enter)",
+            style="Primario.TButton",
+            command=self.aprovar_e_proximo_pendente,
+        )
+        self.botao_aprovar_pendente.pack(fill="x")
         self.botao_salvar = ttk.Button(
-            acoes_foto, text="Salvar Recorte desta Foto", style="Primario.TButton",
+            acoes_foto, text="Só Salvar Recorte desta Foto",
             command=lambda: self.salvar(False),
         )
-        self.botao_salvar.pack(fill="x")
+        self.botao_salvar.pack(fill="x", pady=(4, 0))
         self.botao_salvar_prox = ttk.Button(
             acoes_foto, text="Salvar e Próxima Foto", command=lambda: self.salvar(True)
         )
@@ -2874,6 +2890,7 @@ class AbaFotos:
             acoes_foto, text="Restaurar Foto Original", command=self.restaurar
         )
         self.botao_restaurar.pack(fill="x", pady=(4, 0))
+        self.tela.bind("<Return>", lambda e: self.aprovar_e_proximo_pendente())
 
         quadro_opcoes = ttk.LabelFrame(
             quadro_recorte, text="7 Melhores da Pasta (Troca 1 Clique)", padding=4
@@ -3479,14 +3496,24 @@ class AbaFotos:
             pares = [
                 (grupo, entrada)
                 for grupo in self._revisao_por_curso.values() for entrada in grupo["entradas"]
-                if self._situacao_nome(entrada.get("layout"))[1] in ("nome_estoura", "nome_reduzido")
+                if (entrada["nome"], entrada["tamanho_capa"]) not in self._aprovados_revisao
+                and (
+                    not grupo.get("simbolo")
+                    or self._situacao_nome(entrada.get("layout"))[1] in ("nome_estoura", "nome_reduzido")
+                )
             ]
         else:
             grupo = self._revisao_por_curso.get(self._curso_revisao_selecionado)
             pares = [(grupo, entrada) for entrada in grupo["entradas"]] if grupo else []
         pares.sort(key=lambda par: par[1]["nome"].casefold())
         for indice, (grupo, entrada) in enumerate(pares):
-            texto, tag = self._situacao_nome(entrada.get("layout"))
+            chave_ap = (entrada["nome"], entrada["tamanho_capa"])
+            if chave_ap in self._aprovados_revisao:
+                texto, tag = "Aprovado ✓", "aluno_aprovado"
+            elif not grupo.get("simbolo"):
+                texto, tag = "Sem Curso", "nome_estoura"
+            else:
+                texto, tag = self._situacao_nome(entrada.get("layout"))
             iid = "aluno_" + str(indice)
             self.lista_alunos.insert(
                 "", "end", iid=iid, values=(entrada["nome"], entrada["tamanho_capa"], texto),
@@ -4191,6 +4218,47 @@ class AbaFotos:
             valores[2] = situacao
             self.lista.item(arquivo.name, values=valores, tags=(situacao,))
 
+    def aprovar_e_proximo_pendente(self):
+        """Aprova a capa do formando atual (salva recorte se alterado) e pula direto para o próximo pendente."""
+        if self._aluno_nome:
+            grupo_at, ent_at = self._aluno_nome
+            chave_at = (ent_at["nome"], ent_at["tamanho_capa"])
+            self._aprovados_revisao.add(chave_at)
+            if not grupo_at.get("simbolo") and self.curso_para_foto.get().strip():
+                self._definir_curso_direto()
+
+        # Procura o próximo aluno com pendência (sem curso ou nome estourando/reduzido) ainda não aprovado
+        candidatos_pendentes = []
+        for g in self._revisao_por_curso.values():
+            for ent in g.get("entradas", []):
+                ch = (ent["nome"], ent["tamanho_capa"])
+                if ch in self._aprovados_revisao:
+                    continue
+                _, tag_n = self._situacao_nome(ent.get("layout"))
+                if (not g.get("simbolo")) or tag_n in ("nome_estoura", "nome_reduzido"):
+                    candidatos_pendentes.append((g, ent))
+
+        if candidatos_pendentes:
+            prox_g, prox_ent = candidatos_pendentes[0]
+            self._aluno_escolhido = (prox_ent["nome"], prox_ent["tamanho_capa"])
+            self._preencher_alunos_revisao()
+            alvo = next(
+                (iid for iid, (_, e) in self._alunos_por_iid.items() if (e["nome"], e["tamanho_capa"]) == self._aluno_escolhido),
+                None,
+            )
+            if alvo:
+                self.lista_alunos.selection_set(alvo)
+                self.lista_alunos.see(alvo)
+                self._selecionar_aluno_revisao()
+            self.status_revisao.set(
+                f"✓ Aprovado! Avançou direto para o próximo pendente: {prox_ent['nome']} ({prox_ent['tamanho_capa']})."
+            )
+            return
+
+        self._preencher_alunos_revisao()
+        self.proxima()
+        self.status_revisao.set("✓ Capa aprovada! Todas as pendências prioritárias foram conferidas.")
+
     def proxima(self):
 
         itens_alunos = self.lista_alunos.get_children()
@@ -4364,7 +4432,7 @@ class AbaFotos:
             if str(cand.get("caminho", "")) == escolhida_atual:
                 indice_atual = idx
 
-        # Atualiza os 7 cartões da Galeria Fixa abaixo da Prévia Grande
+        # Atualiza os 7 cartões da Galeria Fixa abaixo da Prévia Grande (com indicador de 1 Rosto)
         for idx_b, btn in enumerate(getattr(self, "_botoes_grid_7", [])):
             if idx_b < len(self._opcoes_atuais_lista):
                 c_item = self._opcoes_atuais_lista[idx_b]
@@ -4372,9 +4440,11 @@ class AbaFotos:
                 c_pct = int(round(float(c_item.get("contraste_score", 75))))
                 n_pct = int(round(float(c_item.get("nitidez_score") or min(100.0, float(c_item.get("nitidez", 120)) / 1.8))))
                 b_pct = int(round(float(c_item.get("brilho_score", 85))))
+                qtd_p = int(c_item.get("qtd_pessoas") or 1)
+                tag_rosto = "1Rosto✓" if qtd_p == 1 else f"{qtd_p}Pess!"
                 orient_curta = "Vert✓" if c_item.get("orientacao_ideal") else str(c_item.get("orientacao", ""))[:4]
                 txt_card = (
-                    f"{'★ ' if ativa else ''}#{idx_b + 1} · {c_item.get('nota', 0)}p ({orient_curta})\n"
+                    f"{'★ ' if ativa else ''}#{idx_b + 1} · {tag_rosto} ({orient_curta})\n"
                     f"{str(c_item.get('nome_arquivo', ''))[:16]}\n"
                     f"C:{c_pct}%  N:{n_pct}%  B:{b_pct}%"
                 )
@@ -4726,7 +4796,7 @@ class AbaFotos:
         f = self.fator_red
         caixa_red = tuple(round(c * f) for c in self.caixa)
         mw, mh = self._molde()
-        escala = min(1.0, 1400 / max(mw, mh))
+        escala = min(1.0, LADO_PREVIA_REVISAO / max(mw, mh))
         filtro_interp = Image.BILINEAR if getattr(self, "_arrasto", None) else Image.LANCZOS
         recortada = self.reduzida.crop(caixa_red).resize(
             (max(1, round(mw * escala)), max(1, round(mh * escala))), filtro_interp)

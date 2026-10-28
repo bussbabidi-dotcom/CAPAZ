@@ -90,7 +90,7 @@ PREENCHIMENTO_POR_TAMANHO = {
 CAPAS_DO_TAMANHO = {
     "30X20": ["30X20", "30X22"],
 }
-LADO_PREVIA_CAPA = 1400
+LADO_PREVIA_CAPA = 2000
 VERSAO_PRESET_CURSO = 5
 CAMADAS_SIMPLES = {"pixel", "type", "shape", "smartobject", "solidcolorfill", "patternfill"}
 
@@ -137,12 +137,12 @@ CALIBRACAO_PADRAO = {
 }
 
 TOLERANCIA_MOLDE_PX = 2
-LADO_DETECCAO = 480
-LADO_PROXY_LOCAL = 512
-QUALIDADE_PROXY_LOCAL = 68
-LADO_PREVIA_RAPIDA = 1400
+LADO_DETECCAO = 960
+LADO_PROXY_LOCAL = 1024
+QUALIDADE_PROXY_LOCAL = 82
+LADO_PREVIA_RAPIDA = 2000
 MAX_FOTOS_POR_ONDA_SUBPASTA = 7
-MAX_TRIAGEM_ORIENTACAO_CABECALHO = 12
+MAX_TRIAGEM_ORIENTACAO_CABECALHO = 18
 LIMITE_CPU_PCT_PADRAO = 60
 USAR_GPU_OPENCL_PADRAO = True
 USAR_COPIA_LEVE_LOCAL_PADRAO = True
@@ -603,7 +603,7 @@ def verificar_cache_analise_subpastas(
             if k.startswith("_") or not isinstance(val, dict):
                 continue
             fotos_em_cache += 1
-            if k.endswith("|v2"):
+            if k.endswith("|v3") or k.endswith("|v2"):
                 chave_rosto = k[:-3]
                 if chave_rosto not in cache_r and "rostos" in val:
                     rostos_lista = val.get("rostos") or []
@@ -639,7 +639,7 @@ def verificar_cache_analise_subpastas(
                             st = entry.stat()
                             norm_p = _norm_caminho_rapido(entry.path)
                             ch_r = f"{norm_p}|{st.st_mtime_ns}|{st.st_size}"
-                            if ch_r in cache_r or f"{ch_r}|v2" in cache_an:
+                            if ch_r in cache_r or f"{ch_r}|v3" in cache_an:
                                 fotos_atuais_em_cache += 1
                             elif processar_pendentes_pool:
                                 pendentes_pasta.append((str(entry.path), st.st_mtime_ns, st.st_size, False))
@@ -713,13 +713,14 @@ def detectar_rosto_cache(caminho, img=None):
             return cache[chave_cache]
         # Verifica também o cache_analise_subpastas.json para nunca reprocessar fotos já analisadas
         cache_an = _carregar_cache_analise_subpastas()
-        chave_an = f"{chave_cache}|v2"
-        if chave_an in cache_an and isinstance(cache_an[chave_an], dict):
-            rostos_an = cache_an[chave_an].get("rostos") or []
-            rosto_cached = rostos_an[0] if rostos_an else None
-            with _cache_rostos_lock:
-                cache[chave_cache] = rosto_cached
-            return rosto_cached
+        for sufixo_v in ("|v3", "|v2"):
+            chave_an = f"{chave_cache}{sufixo_v}"
+            if chave_an in cache_an and isinstance(cache_an[chave_an], dict):
+                rostos_an = cache_an[chave_an].get("rostos") or []
+                rosto_cached = rostos_an[0] if rostos_an else None
+                with _cache_rostos_lock:
+                    cache[chave_cache] = rosto_cached
+                return rosto_cached
         destinos_map = cache_an.get("_destinos_copiados") or {}
         info_dest = destinos_map.get(norm_path)
         if isinstance(info_dest, dict) and info_dest.get("chave_dest") == chave_cache:
@@ -938,7 +939,7 @@ def _garantir_copia_leve_local(
     norm_p = _norm_caminho_rapido(caminho_p)
     norm_parent = _norm_caminho_rapido(caminho_p.parent)
     sub_hash = hashlib.md5(norm_parent.encode("utf-8", errors="ignore")).hexdigest()[:12]
-    arq_hash = hashlib.md5(f"{norm_p}|{mtime_ns}|{fsize}".encode("utf-8", errors="ignore")).hexdigest()[:16]
+    arq_hash = hashlib.md5(f"{norm_p}|{mtime_ns}|{fsize}|{lado_proxy}".encode("utf-8", errors="ignore")).hexdigest()[:16]
 
     pasta_sub_proxy = PASTA_PROXIES_ANALISE / sub_hash
     # Verifica se já existe proxy salvo com dimensões codificadas no nome (<arq_hash>_<W>x<H>.jpg)
@@ -1027,7 +1028,7 @@ def detectar_rostos_bgr(bgr, tamanho_original=None, usar_haar_fallback=False):
     if faces is not None and len(faces):
         for f in faces:
             score = float(f[14]) if len(f) > 14 else 0.85
-            if score < 0.56:
+            if score < 0.50:
                 continue
             x = float(f[0]) / escala_x
             y = float(f[1]) / escala_y
@@ -1051,6 +1052,10 @@ def detectar_rostos_bgr(bgr, tamanho_original=None, usar_haar_fallback=False):
                 "metodo": "yunet",
             })
         resultado.sort(key=lambda r: r["w"] * r["h"], reverse=True)
+        # Garante que o rosto principal tenha confiança sólida (>= 0.54), mantendo rostos secundários (>= 0.50) para detectar fotos em dupla/grupo
+        if resultado and resultado[0].get("score", 0.0) >= 0.54:
+            return resultado
+        resultado = [r for r in resultado if r.get("score", 0.0) >= 0.54]
         if resultado:
             return resultado
 
@@ -1190,7 +1195,7 @@ def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None, usar_copia_l
             mtime_ns, fsize = st.st_mtime_ns, st.st_size
         norm_path = _norm_caminho_rapido(caminho_p)
         chave_rosto_cache = f"{norm_path}|{mtime_ns}|{fsize}"
-        chave_cache = f"{chave_rosto_cache}|v2"
+        chave_cache = f"{chave_rosto_cache}|v3"
         cache_an = _carregar_cache_analise_subpastas()
         if chave_cache in cache_an:
             return cache_an[chave_cache]
@@ -1217,6 +1222,7 @@ def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None, usar_copia_l
             "W": W,
             "H": H,
             "rostos": [],
+            "qtd_pessoas": 0,
             "var_lap": 0.0,
             "embacada": True,
             "pts_nitidez": 0.0,
@@ -1232,27 +1238,34 @@ def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None, usar_copia_l
         return dados_sem_rosto
 
     rosto = rostos[0]
+    area_principal_base = max(1.0, rosto["w"] * rosto["h"])
+    rostos_relevantes_base = [
+        r for r in rostos if (r["w"] * r["h"]) >= area_principal_base * 0.12 and float(r.get("score", 0.8)) >= 0.50
+    ]
+    qtd_pessoas_base = max(1, len(rostos_relevantes_base))
+
     ph, pw = bgr_red.shape[:2]
     escala_x = pw / float(max(1, W))
     escala_y = ph / float(max(1, H))
     fx0 = int(max(0, round(rosto["x"] * escala_x)))
     fy0 = int(max(0, round(rosto["y"] * escala_y)))
-    fx1 = int(min(pw, max(fx0 + 8, round((rosto["x"] + rosto["w"]) * escala_x))))
-    fy1 = int(min(ph, max(fy0 + 8, round((rosto["y"] + rosto["h"]) * escala_y))))
+    fx1 = int(min(pw, max(fx0 + 12, round((rosto["x"] + rosto["w"]) * escala_x))))
+    fy1 = int(min(ph, max(fy0 + 12, round((rosto["y"] + rosto["h"]) * escala_y))))
 
     recorte_bgr = bgr_red[fy0:fy1, fx0:fx1]
     recorte_cinza = cv2.cvtColor(recorte_bgr, cv2.COLOR_BGR2GRAY)
-    arr_rosto = cv2.resize(recorte_cinza, (96, 96), interpolation=cv2.INTER_LINEAR)
+    # Janela de 160x160 px (2.7x mais pixels na face) para cálculo de nitidez e contraste com alta precisão
+    arr_rosto = cv2.resize(recorte_cinza, (160, 160), interpolation=cv2.INTER_LINEAR)
 
-    # Nitidez rápida no rosto (Variância do Laplaciano em 96x96 < 0.1 ms)
+    # Nitidez rápida no rosto (Variância do Laplaciano em 160x160)
     var_lap = float(cv2.Laplacian(arr_rosto, cv2.CV_64F).var())
-    embacada = var_lap < 36.0
-    if var_lap >= 110.0:
+    embacada = var_lap < 32.0
+    if var_lap >= 95.0:
         pts_nitidez = 6.0
-    elif var_lap >= 36.0:
-        pts_nitidez = round(2.5 + 3.5 * ((var_lap - 36.0) / (110.0 - 36.0)), 1)
+    elif var_lap >= 32.0:
+        pts_nitidez = round(2.5 + 3.5 * ((var_lap - 32.0) / (95.0 - 32.0)), 1)
     else:
-        pts_nitidez = round(max(0.0, 2.0 * (var_lap / 36.0)), 1)
+        pts_nitidez = round(max(0.0, 2.0 * (var_lap / 32.0)), 1)
 
     # Rosto de frente olhando para a câmera (leve)
     pts_frente = 3.0
@@ -1277,6 +1290,7 @@ def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None, usar_copia_l
         "W": W,
         "H": H,
         "rostos": rostos,
+        "qtd_pessoas": qtd_pessoas_base,
         "var_lap": round(var_lap, 1),
         "embacada": embacada,
         "pts_nitidez": pts_nitidez,
@@ -1349,13 +1363,14 @@ def _separar_por_orientacao_rapido(
 
 def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, metricas_base=None):
     """
-    Avalia rapidamente uma foto candidata para um tamanho de capa ('20X20', '30X20', '24X34')
-    priorizando a ORIENTAÇÃO e o ENCAIXE sem demorar escolhendo critérios pesados:
-      1. Orientação ideal + Encaixe pós-corte (até 45 pts: 25 pts orientação ideal + 20 pts encaixe;
-         critério #1 absoluto na separação e no ranking)
-      2. Pessoa sozinha na foto (até 25 pts; evita fotos em grupo)
-      3. Densidade / Proporção do rosto no corte (até 18 pts)
-      4. Desempate rápido de nitidez, frente e luz (até 12 pts)
+    Avalia uma foto candidata para um tamanho de capa ('20X20', '30X20', '24X34')
+    identificando PRIMEIRO OS ROSTOS e bloqueando fotos com mais de 1 pessoa:
+      1. Rosto detectado + Estritamente 1 pessoa na foto (`qtd_pessoas == 1`): critério #1 eliminatório.
+         Fotos com 2 ou mais pessoas recebem bloqueio (`aprovada_individual = False`) e nunca são escolhidas
+         quando há foto individual na subpasta.
+      2. Orientação ideal + Encaixe pós-corte no molde.
+      3. Densidade / Proporção do rosto no corte (em alta precisão de pixels).
+      4. Nitidez, olhar de frente, brilho e contraste.
     """
     caminho_p = Path(caminho)
     base = metricas_base if metricas_base is not None else _extrair_metricas_base_foto(caminho_p)
@@ -1372,7 +1387,8 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
             "nome_arquivo": caminho_p.name,
             "tamanho": tam,
             "valida": False,
-            "nota": 15.0 if orientacao_ideal else 5.0,
+            "aprovada_individual": False,
+            "nota": 5.0 if orientacao_ideal else 1.0,
             "qtd_pessoas": 0,
             "orientacao": orientacao_foto,
             "orientacao_ideal": orientacao_ideal,
@@ -1397,8 +1413,12 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
 
     rosto = rostos[0]
     area_principal = max(1.0, rosto["w"] * rosto["h"])
-    rostos_relevantes = [r for r in rostos if (r["w"] * r["h"]) >= area_principal * 0.18]
-    qtd_pessoas = len(rostos_relevantes)
+    # Sensibilidade reforçada (>= 12% da área do rosto principal) para identificar qualquer 2ª pessoa na foto
+    rostos_relevantes = [
+        r for r in rostos if (r["w"] * r["h"]) >= area_principal * 0.12 and float(r.get("score", 0.8)) >= 0.50
+    ]
+    qtd_pessoas = max(1, len(rostos_relevantes))
+    aprovada_individual = (qtd_pessoas == 1)
 
     # Caixa ideal vs Caixa real pós-corte
     calib_uso = calib or CALIBRACAO_PADRAO
@@ -1409,8 +1429,20 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
     cl, ct, cr, cb = caixa
     cw, ch = max(1.0, float(cr - cl)), max(1.0, float(cb - ct))
 
-    # 1. Critério Principal (#1): Orientação Ideal + Encaixe Pós-Corte (até 45 pts: 25 orientação + 20 encaixe)
-    pts_orientacao = 25.0 if orientacao_ideal else 0.0
+    # 1. Critério #1 Absoluto: Rosto Individual (1 única pessoa) vs Múltiplas Pessoas
+    if aprovada_individual:
+        pts_sozinha = 30.0
+        tag_pessoas = "1 Rosto (Individual)"
+    else:
+        outros_no_corte = 0
+        for r_sec in rostos_relevantes[1:]:
+            if (r_sec["cx"] >= cl and r_sec["cx"] <= cr and r_sec["olhos_y"] >= ct and r_sec["olhos_y"] <= cb):
+                outros_no_corte += 1
+        pts_sozinha = -45.0 - (10.0 * outros_no_corte)
+        tag_pessoas = f"{qtd_pessoas} pessoas (Bloqueada p/ capa individual)"
+
+    # 2. Orientação Ideal + Encaixe Pós-Corte (até 40 pts: 20 orientação + 20 encaixe)
+    pts_orientacao = 20.0 if orientacao_ideal else 0.0
 
     escala_preservada = min(1.0, ch / max(1.0, crop_h_ideal))
     olhos_y_pos_corte = (rosto["olhos_y"] - ct) / ch
@@ -1435,23 +1467,7 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
     encaixe_pct = int(round(max(0.0, min(1.0, encaixe_ratio)) * 100))
     pts_encaixe = round(20.0 * max(0.0, min(1.0, encaixe_ratio)), 1)
 
-    # 2. Critério: Pessoa sozinha na foto (até 25 pts)
-    if qtd_pessoas == 1:
-        pts_sozinha = 25.0
-        tag_pessoas = "Sozinha"
-    else:
-        outros_no_corte = 0
-        for r_sec in rostos_relevantes[1:]:
-            if (r_sec["cx"] >= cl and r_sec["cx"] <= cr and r_sec["olhos_y"] >= ct and r_sec["olhos_y"] <= cb):
-                outros_no_corte += 1
-        if outros_no_corte > 0:
-            pts_sozinha = max(-15.0, 4.0 - 12.0 * outros_no_corte)
-            tag_pessoas = f"{qtd_pessoas} pessoas (no corte)"
-        else:
-            pts_sozinha = 10.0
-            tag_pessoas = f"{qtd_pessoas} pessoas (fora do corte)"
-
-    # 3. Critério: Densidade de pixels no rosto após o crop simulado (até 18 pts)
+    # 3. Densidade de pixels no rosto após o crop simulado (até 18 pts)
     rx0 = max(float(cl), float(rosto["x"]))
     ry0 = max(float(ct), float(rosto["y"]))
     rx1 = min(float(cr), float(rosto["x"] + rosto["w"]))
@@ -1475,7 +1491,7 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
     else:
         pts_densidade = round(max(0.0, 8.0 * min(1.0, densidade_ratio) - 10.0 * (amp - ampliacao_maxima)), 1)
 
-    # 4. Desempate rápido de Nitidez / Luz (até 12 pts somados, sem penalizar excessivamente a orientação certa)
+    # 4. Nitidez / Luz em alta resolução (até 12 pts)
     var_lap = float(base.get("var_lap", 0.0))
     embacada = bool(base.get("embacada", False))
     pts_nitidez = min(6.0, float(base.get("pts_nitidez", 4.0)))
@@ -1485,7 +1501,7 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
     brilho_medio = float(hist_luz.get("brilho_medio", 132.0))
     desvio_brilho = abs(brilho_medio - 134.0)
     brilho_score = int(round(max(15.0, min(100.0, 100.0 - desvio_brilho * 0.75))))
-    nitidez_score = int(round(max(10.0, min(100.0, (var_lap / 180.0) * 100.0))))
+    nitidez_score = int(round(max(10.0, min(100.0, (var_lap / 150.0) * 100.0))))
     baixo_contraste = bool(hist_luz.get("baixo_contraste", False))
     estouro_luz = bool(hist_luz.get("estouro_luz", False))
     altas_luzes_pct = float(hist_luz.get("altas_luzes_pct", 0.0))
@@ -1493,6 +1509,9 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
 
     penalidade_descarte = 0.0
     avisos_qualidade = []
+    if not aprovada_individual:
+        penalidade_descarte += 35.0
+        avisos_qualidade.append(f"{qtd_pessoas} pessoas detectadas")
     if estouro_luz:
         penalidade_descarte += 8.0
         avisos_qualidade.append(f"Estouro de luz ({altas_luzes_pct:.1f}%)")
@@ -1503,24 +1522,27 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
         penalidade_descarte += 8.0
         avisos_qualidade.append(f"Foto embaçada (nitidez {var_lap:.0f})")
 
-    aprovada_qualidade = (not estouro_luz) and (not baixo_contraste) and (not embacada)
+    aprovada_qualidade = aprovada_individual and (not estouro_luz) and (not baixo_contraste) and (not embacada)
     aviso_qualidade = " · ".join(avisos_qualidade)
 
     nota_bruta = (
-        pts_orientacao
+        pts_sozinha
+        + pts_orientacao
         + pts_encaixe
-        + pts_sozinha
         + pts_densidade
         + pts_nitidez
         + pts_frente
         + pts_luz
         - penalidade_descarte
     )
-    nota_total = round(max(1.0, min(100.0, nota_bruta)), 1)
+    if not aprovada_individual:
+        nota_total = round(max(1.0, min(25.0, nota_bruta)), 1)
+    else:
+        nota_total = round(max(1.0, min(100.0, nota_bruta)), 1)
 
     partes_resumo = [
-        orientacao_foto + (" (Ideal)" if orientacao_ideal else " (Adaptada)"),
         tag_pessoas,
+        orientacao_foto + (" (Ideal)" if orientacao_ideal else " (Adaptada)"),
         f"Encaixe {encaixe_pct}%",
         f"Rosto {densidade_rosto_px}px",
     ]
@@ -1529,6 +1551,7 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
         "nome_arquivo": caminho_p.name,
         "tamanho": tam,
         "valida": True,
+        "aprovada_individual": aprovada_individual,
         "nota": nota_total,
         "qtd_pessoas": qtd_pessoas,
         "orientacao": orientacao_foto,
@@ -1635,7 +1658,7 @@ def _assinatura_subpasta(itens_com_stat, tamanhos_necessarios, cfg, calib):
     Gera assinatura determinística da subpasta em O(N) sem novas chamadas .stat() no disco,
     permitindo carregamento instantâneo (0ms) via `cache_analise_subpastas.json` quando nada mudou.
     """
-    partes = ["v4_top7_orient", ",".join(tamanhos_necessarios), str(cfg.get("ampliacao_maxima", 1.2))]
+    partes = ["v5_face1_1024px", ",".join(tamanhos_necessarios), str(cfg.get("ampliacao_maxima", 1.2))]
     for tam in tamanhos_necessarios:
         molde = cfg["moldes"].get(tam, MOLDES_PADRAO.get(tam, (3874, 3012)))
         c_tam = (calib or {}).get(tam, CALIBRACAO_PADRAO)
@@ -1687,9 +1710,11 @@ def _listar_imagens_subpasta(pasta_aluno):
 
 def _ja_tem_candidatas_excelentes(metricas_por_arquivo, tamanhos_necessarios, cfg, calib, min_candidatas=MAX_FOTOS_POR_ONDA_SUBPASTA):
     """
-    Parada rápida por Orientação para as 7 melhores: assim que a subpasta já reuniu `min_candidatas`
-    fotos válidas na ORIENTAÇÃO IDEAL (ou pelo menos 1 excelente quando a pasta tem poucas fotos),
-    encerra imediatamente a análise sem gastar tempo avaliando o restante da pasta.
+    Parada inteligente que exige PRIMEIRO ROSTO ÚNICO (`qtd_pessoas == 1`):
+    só encerra a busca antecipada na subpasta se já tiver reunido `min_candidatas` fotos
+    com EXATAMENTE 1 PESSOA detectada e na orientação ideal. Se as fotos analisadas até aqui
+    tiverem mais de 1 pessoa (ex.: fotos com família/amigos) ou não tiverem rosto, continua
+    varrendo a subpasta em busca das fotos individuais do formando.
     """
     if not metricas_por_arquivo:
         return False
@@ -1700,7 +1725,7 @@ def _ja_tem_candidatas_excelentes(metricas_por_arquivo, tamanhos_necessarios, cf
     for tam in tamanhos_necessarios:
         molde = cfg["moldes"].get(tam, MOLDES_PADRAO.get(tam, (3874, 3012)))
         calib_tam = calib.get(tam, CALIBRACAO_PADRAO)
-        qtd_orientacao_ok = 0
+        qtd_individual_ok = 0
         for cam_str, m_base in metricas_por_arquivo.items():
             rostos = (m_base or {}).get("rostos") or []
             if not rostos:
@@ -1709,11 +1734,16 @@ def _ja_tem_candidatas_excelentes(metricas_por_arquivo, tamanhos_necessarios, cf
             if not _orientacao_ideal_para_molde(W_m, H_m, tam, molde):
                 continue
             av = avaliar_foto_para_molde(cam_str, tam, molde, calib_tam, amp_max, metricas_base=m_base)
-            if av.get("valida") and av.get("orientacao_ideal") and int(av.get("encaixe_pct", 0)) >= 68:
-                qtd_orientacao_ok += 1
-                if qtd_orientacao_ok >= min(alvo_qtd, 3):
+            if (
+                av.get("valida")
+                and av.get("qtd_pessoas") == 1
+                and av.get("orientacao_ideal")
+                and int(av.get("encaixe_pct", 0)) >= 68
+            ):
+                qtd_individual_ok += 1
+                if qtd_individual_ok >= min(alvo_qtd, 4):
                     break
-        if qtd_orientacao_ok == 0:
+        if qtd_individual_ok < min(alvo_qtd, 2):
             return False
     return True
 
@@ -1766,7 +1796,7 @@ def _extrair_metricas_foto_worker(item):
         usar_copia_leve = True
     norm_p = _norm_caminho_rapido(cam_str)
     ch_r = f"{norm_p}|{mtime_ns}|{fsize}"
-    ch_an = f"{ch_r}|v2"
+    ch_an = f"{ch_r}|v3"
     try:
         m_base = _extrair_metricas_base_foto(cam_str, mtime_ns, fsize, usar_copia_leve=bool(usar_copia_leve))
         return ch_an, ch_r, m_base
@@ -1913,7 +1943,7 @@ def _processar_subpasta_worker(tarefa):
     for arq, mtime_ns, fsize in itens_sub:
         norm_arq = _norm_caminho_rapido(arq)
         ch_rosto = f"{norm_arq}|{mtime_ns}|{fsize}"
-        ch_an = f"{ch_rosto}|v2"
+        ch_an = f"{ch_rosto}|v3"
         if ch_an in cache_an and isinstance(cache_an[ch_an], dict):
             metricas_por_arquivo[str(arq)] = cache_an[ch_an]
             fotos_hit_cache += 1
@@ -1924,21 +1954,21 @@ def _processar_subpasta_worker(tarefa):
     proxies_usados_sub = 0
 
     alvo_top_sub = min(MAX_FOTOS_POR_ONDA_SUBPASTA, len(itens_sub))
-    # Se o cache já possui as 7 candidatas na orientação ideal, nem precisa decodificar as pendentes!
+    # Só pula a análise de novas fotos se já tiver as candidatas com EXATAMENTE 1 ROSTO e orientação ideal
     precisa_analisar_novas = not _ja_tem_candidatas_excelentes(
         metricas_por_arquivo, tamanhos_necessarios, cfg_local, calib, min_candidatas=alvo_top_sub
     )
 
     if fotos_para_analisar and precisa_analisar_novas:
-        # SEPARAÇÃO RÁPIDA POR ORIENTAÇÃO via cabeçalho (< 0.08ms/foto, sem decodificar imagem)
+        # Separa primeiro as fotos na orientação ideal, mas mantém todas disponíveis caso as primeiras tenham >1 pessoa
         grupo_ideal, grupo_reserva = _separar_por_orientacao_rapido(
             fotos_para_analisar,
             tamanhos_necessarios,
             cfg_local["moldes"],
-            max_orientacao_ideal=MAX_TRIAGEM_ORIENTACAO_CABECALHO,
+            max_orientacao_ideal=max(MAX_TRIAGEM_ORIENTACAO_CABECALHO, len(fotos_para_analisar)),
         )
 
-        # Analisa primeiro as fotos na orientação ideal até completar as 7 melhores opções para escolha rápida
+        # Analisa identificando PRIMEIRO OS ROSTOS: só para quando reunir candidatas individuais (1 única pessoa)
         for idx_cand, (arq, mtime_ns, fsize, ch_an, ch_rosto) in enumerate(grupo_ideal, 1):
             try:
                 m_base = _extrair_metricas_base_foto(
@@ -1954,17 +1984,23 @@ def _processar_subpasta_worker(tarefa):
             except Exception:
                 pass
 
-            if len(metricas_por_arquivo) >= alvo_top_sub and _ja_tem_candidatas_excelentes(
+            qtd_individuais_ate_agora = sum(
+                1 for m in metricas_por_arquivo.values()
+                if bool((m or {}).get("rostos")) and int((m or {}).get("qtd_pessoas", len((m or {}).get("rostos") or []))) == 1
+            )
+            if qtd_individuais_ate_agora >= alvo_top_sub and _ja_tem_candidatas_excelentes(
                 metricas_por_arquivo, tamanhos_necessarios, cfg_local, calib, min_candidatas=alvo_top_sub
             ):
                 break
 
-        # Se a subpasta tinha menos de 7 fotos na orientação ideal, completa até 7 com o grupo de reserva
-        faltam_para_7 = max(0, MAX_FOTOS_POR_ONDA_SUBPASTA - len(metricas_por_arquivo))
-        tem_algum_rosto = any(bool((m or {}).get("rostos")) for m in metricas_por_arquivo.values())
-        if (faltam_para_7 > 0 or not tem_algum_rosto) and grupo_reserva:
-            limite_reserva = max(faltam_para_7, 2) if faltam_para_7 > 0 else MAX_FOTOS_POR_ONDA_SUBPASTA
-            for arq, mtime_ns, fsize, ch_an, ch_rosto in grupo_reserva[:limite_reserva]:
+        # Se ainda faltam fotos individuais (1 única pessoa) para completar as 7 opções, analisa o grupo reserva
+        qtd_individuais_total = sum(
+            1 for m in metricas_por_arquivo.values()
+            if bool((m or {}).get("rostos")) and int((m or {}).get("qtd_pessoas", len((m or {}).get("rostos") or []))) == 1
+        )
+        faltam_individuais = max(0, MAX_FOTOS_POR_ONDA_SUBPASTA - qtd_individuais_total)
+        if faltam_individuais > 0 and grupo_reserva:
+            for arq, mtime_ns, fsize, ch_an, ch_rosto in grupo_reserva:
                 try:
                     m_base = _extrair_metricas_base_foto(
                         arq, mtime_ns, fsize, usar_copia_leve=usar_copia_leve
@@ -1976,12 +2012,14 @@ def _processar_subpasta_worker(tarefa):
                     fotos_analisadas_sub += 1
                     if usar_copia_leve and (m_base or {}).get("proxy_local"):
                         proxies_usados_sub += 1
-                    if len(metricas_por_arquivo) >= MAX_FOTOS_POR_ONDA_SUBPASTA and (tem_algum_rosto or rostos_l):
-                        break
+                    if len(rostos_l) == 1:
+                        qtd_individuais_total += 1
+                        if qtd_individuais_total >= MAX_FOTOS_POR_ONDA_SUBPASTA:
+                            break
                 except Exception:
                     pass
 
-    # 2) Avalia cada tamanho exigido pelo plano priorizando ORIENTAÇÃO IDEAL e copia a campeã ORIGINAL para FOTO
+    # 2) Avalia cada tamanho exigido pelo plano identificando PRIMEIRO 1 ROSTO ÚNICO e bloqueando >1 pessoa
     escolhidas_aluno = {}
     avisos_aluno = []
     candidatas_por_tam = {}
@@ -2007,12 +2045,18 @@ def _processar_subpasta_worker(tarefa):
         if not avaliacoes:
             continue
 
-        # Prioriza: 1º Rosto válido -> 2º ORIENTAÇÃO IDEAL -> 3º Pessoa sozinha -> 4º Encaixe no molde -> 5º Nota
+        # Hierarquia estrita:
+        # 1º Rosto válido E EXATAMENTE 1 PESSOA (`qtd_pessoas == 1`) — nunca escolhe foto em grupo se houver individual!
+        # 2º Rosto detectado (`valida == True`)
+        # 3º Menor quantidade de pessoas extras
+        # 4º Orientação ideal para o molde (`orientacao_ideal == True`)
+        # 5º Encaixe pós-corte, densidade de pixels no rosto, qualidade e nota
         avaliacoes.sort(
             key=lambda a: (
+                1 if (a.get("valida") and a.get("qtd_pessoas") == 1) else 0,
                 1 if a.get("valida") else 0,
+                -abs(int(a.get("qtd_pessoas") or 99) - 1),
                 1 if a.get("orientacao_ideal") else 0,
-                1 if a.get("qtd_pessoas") == 1 else (0 if a.get("qtd_pessoas", 0) > 1 else -1),
                 int(a.get("encaixe_pct", 0)),
                 int(a.get("densidade_rosto_px", 0)),
                 1 if a.get("aprovada_qualidade") else 0,
@@ -2021,8 +2065,24 @@ def _processar_subpasta_worker(tarefa):
             reverse=True,
         )
 
-        campea = dict(avaliacoes[0])
-        if not campea.get("orientacao_ideal"):
+        # Filtra as 7 sugeridas priorizando apenas fotos de 1 única pessoa; só inclui >1 pessoa se não houver 7 individuais
+        individuais_validas = [a for a in avaliacoes if a.get("valida") and a.get("qtd_pessoas") == 1]
+        if individuais_validas:
+            outras_reserva = [a for a in avaliacoes if not (a.get("valida") and a.get("qtd_pessoas") == 1)]
+            avaliacoes_ordenadas = individuais_validas + outras_reserva
+        else:
+            avaliacoes_ordenadas = avaliacoes
+
+        campea = dict(avaliacoes_ordenadas[0])
+        if int(campea.get("qtd_pessoas") or 0) > 1:
+            aviso_msg = f"Atenção: pasta sem foto individual ({campea.get('qtd_pessoas')} pessoas na foto p/ {tam})"
+            campea["aviso_revisao"] = aviso_msg
+            avisos_aluno.append(aviso_msg)
+        elif not campea.get("valida"):
+            aviso_msg = f"Atenção: nenhum rosto detectado na subpasta p/ {tam}"
+            campea["aviso_revisao"] = aviso_msg
+            avisos_aluno.append(aviso_msg)
+        elif not campea.get("orientacao_ideal"):
             aviso_msg = f"Sem foto na orientação ideal p/ {tam} (adaptada de {campea.get('orientacao')})"
             campea["aviso_revisao"] = aviso_msg
             avisos_aluno.append(aviso_msg)
@@ -2056,7 +2116,7 @@ def _processar_subpasta_worker(tarefa):
         except Exception:
             pass
 
-        top_candidatas = avaliacoes[:7]
+        top_candidatas = avaliacoes_ordenadas[:7]
         candidatas_por_tam[tam] = top_candidatas
         chave_op = f"{ch_aluno}|{tam}"
         opcoes_aluno[chave_op] = {
