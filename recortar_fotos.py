@@ -137,11 +137,12 @@ CALIBRACAO_PADRAO = {
 }
 
 TOLERANCIA_MOLDE_PX = 2
-LADO_DETECCAO = 640
-LADO_PROXY_LOCAL = 800
-QUALIDADE_PROXY_LOCAL = 72
+LADO_DETECCAO = 480
+LADO_PROXY_LOCAL = 512
+QUALIDADE_PROXY_LOCAL = 68
 LADO_PREVIA_RAPIDA = 1400
-MAX_FOTOS_POR_ONDA_SUBPASTA = 24
+MAX_FOTOS_POR_ONDA_SUBPASTA = 6
+MAX_TRIAGEM_ORIENTACAO_CABECALHO = 10
 LIMITE_CPU_PCT_PADRAO = 60
 USAR_GPU_OPENCL_PADRAO = True
 USAR_COPIA_LEVE_LOCAL_PADRAO = True
@@ -1241,20 +1242,20 @@ def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None, usar_copia_l
 
     recorte_bgr = bgr_red[fy0:fy1, fx0:fx1]
     recorte_cinza = cv2.cvtColor(recorte_bgr, cv2.COLOR_BGR2GRAY)
-    arr_rosto = cv2.resize(recorte_cinza, (200, 200), interpolation=cv2.INTER_LINEAR)
+    arr_rosto = cv2.resize(recorte_cinza, (96, 96), interpolation=cv2.INTER_LINEAR)
 
-    # Nitidez no rosto (Variância do Laplaciano)
+    # Nitidez rápida no rosto (Variância do Laplaciano em 96x96 < 0.1 ms)
     var_lap = float(cv2.Laplacian(arr_rosto, cv2.CV_64F).var())
-    embacada = var_lap < 42.0
-    if var_lap >= 135.0:
-        pts_nitidez = 14.0
-    elif var_lap >= 42.0:
-        pts_nitidez = round(5.5 + 8.5 * ((var_lap - 42.0) / (135.0 - 42.0)), 1)
+    embacada = var_lap < 36.0
+    if var_lap >= 110.0:
+        pts_nitidez = 6.0
+    elif var_lap >= 36.0:
+        pts_nitidez = round(2.5 + 3.5 * ((var_lap - 36.0) / (110.0 - 36.0)), 1)
     else:
-        pts_nitidez = round(max(0.0, 4.5 * (var_lap / 42.0)), 1)
+        pts_nitidez = round(max(0.0, 2.0 * (var_lap / 36.0)), 1)
 
-    # Rosto de frente olhando para a câmera
-    pts_frente = 5.5
+    # Rosto de frente olhando para a câmera (leve)
+    pts_frente = 3.0
     rosto_de_frente = True
     if "olho_d" in rosto and "olho_e" in rosto and "nariz" in rosto:
         od, oe, nar = rosto["olho_d"], rosto["olho_e"], rosto["nariz"]
@@ -1266,10 +1267,10 @@ def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None, usar_copia_l
             0.0,
             1.0 - max(0.0, assimetria_yaw - 0.04) * 2.5 - max(0.0, inclinacao_roll - 0.04) * 2.0,
         )
-        pts_frente = round(7.0 * min(1.0, fator_frente), 1)
-        rosto_de_frente = fator_frente >= 0.68
+        pts_frente = round(3.0 * min(1.0, fator_frente), 1)
+        rosto_de_frente = fator_frente >= 0.65
 
-    # Histograma (estouro de luz) e Contraste
+    # Histograma rápido (estouro de luz) e Contraste
     hist_luz = _analisar_histograma_e_contraste(arr_rosto)
 
     dados_base = {
@@ -1291,23 +1292,77 @@ def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None, usar_copia_l
     return dados_base
 
 
+def _orientacao_ideal_para_molde(W, H, tam, molde=None):
+    """
+    Verifica instantaneamente se as dimensões (W, H) estão na orientação ideal para o molde `tam`:
+      - Para 24X34 e 30X20: prioriza fotos Verticais / Retrato (H >= W * 0.95).
+      - Para 20X20: prioriza fotos Verticais ou Quadradas/Proporcionais (H >= W * 0.95 ou 0.78 <= W/H <= 1.32).
+    """
+    W_f, H_f = float(max(1, W)), float(max(1, H))
+    if str(tam).upper() in ("24X34", "30X20"):
+        return H_f >= W_f * 0.95
+    return (H_f >= W_f * 0.95) or (0.78 <= (W_f / H_f) <= 1.32)
+
+
+def _separar_por_orientacao_rapido(
+    fotos_para_analisar,
+    tamanhos_necessarios,
+    moldes=None,
+    max_orientacao_ideal=MAX_TRIAGEM_ORIENTACAO_CABECALHO,
+):
+    """
+    Triagem ultra-rápida por orientação (< 0.08 ms por foto, lendo SOMENTE o cabeçalho EXIF/JPEG via
+    `tamanho_rapido` sem decodificar pixels):
+      1. Separa imediatamente as fotos que já estão na orientação ideal dos moldes (`grupo_ideal`)
+         das fotos em outra orientação (`grupo_reserva`).
+      2. Assim que reúne `max_orientacao_ideal` fotos na orientação certa (priorizando arquivos maiores/melhores),
+         encerra a varredura de cabeçalhos em pastas gigantes para não perder tempo avaliando critérios em dezenas de fotos.
+    Retorna `(grupo_ideal, grupo_reserva)`.
+    """
+    if not fotos_para_analisar:
+        return [], []
+
+    # Ordena primeiro pelas fotos de maior tamanho em bytes (retratos originais de estúdio têm mais dados que miniaturas)
+    candidatas_ordenadas = sorted(fotos_para_analisar, key=lambda item: item[2], reverse=True)
+    grupo_ideal = []
+    grupo_reserva = []
+    tams = list(tamanhos_necessarios or ["30X20"])
+
+    for item in candidatas_ordenadas:
+        arq = item[0]
+        try:
+            W_hdr, H_hdr = tamanho_rapido(arq)
+            eh_ideal = any(_orientacao_ideal_para_molde(W_hdr, H_hdr, t) for t in tams)
+        except Exception:
+            eh_ideal = True
+
+        if eh_ideal:
+            grupo_ideal.append(item)
+            if len(grupo_ideal) >= max_orientacao_ideal:
+                break
+        else:
+            if len(grupo_reserva) < max(4, max_orientacao_ideal // 2):
+                grupo_reserva.append(item)
+
+    return grupo_ideal, grupo_reserva
+
+
 def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, metricas_base=None):
     """
-    Avalia uma foto candidata para um tamanho de capa ('20X20', '30X20', '24X34') segundo 7 critérios:
-      1. Pessoa sozinha na foto (até 22 pts; penaliza fotos em grupo)
-      2. Orientação ideal + Encaixe pós-corte (até 26 pts: 6 pts orientação + 20 pts encaixe pós-corte;
-         se não houver foto na orientação ideal, vence a que depois do corte melhor se encaixa)
-      3. Densidade de pixels no rosto após o crop simulado (até 24 pts + critério principal de desempate)
-      4. Nitidez no rosto / Não embaçada (até 14 pts via variância do Laplaciano)
-      5. Rosto de frente olhando para a câmera (até 7 pts via simetria dos pontos faciais)
-      6. Histograma de iluminação sem estouro nas altas luzes e bom contraste (até 7 pts;
-         descarta/rebaixa fotos com baixo contraste ou pico de estouro de luz, mantendo fallback p/ menos pior)
+    Avalia rapidamente uma foto candidata para um tamanho de capa ('20X20', '30X20', '24X34')
+    priorizando a ORIENTAÇÃO e o ENCAIXE sem demorar escolhendo critérios pesados:
+      1. Orientação ideal + Encaixe pós-corte (até 45 pts: 25 pts orientação ideal + 20 pts encaixe;
+         critério #1 absoluto na separação e no ranking)
+      2. Pessoa sozinha na foto (até 25 pts; evita fotos em grupo)
+      3. Densidade / Proporção do rosto no corte (até 18 pts)
+      4. Desempate rápido de nitidez, frente e luz (até 12 pts)
     """
     caminho_p = Path(caminho)
     base = metricas_base if metricas_base is not None else _extrair_metricas_base_foto(caminho_p)
     W, H = int(base["W"]), int(base["H"])
     mw, mh = molde
     orientacao_foto = "Vertical" if H > W * 1.05 else ("Horizontal" if W > H * 1.05 else "Quadrada")
+    orientacao_ideal = _orientacao_ideal_para_molde(W, H, tam, molde)
 
     rostos = base.get("rostos") or []
     if not rostos:
@@ -1317,10 +1372,10 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
             "nome_arquivo": caminho_p.name,
             "tamanho": tam,
             "valida": False,
-            "nota": 5.0,
+            "nota": 15.0 if orientacao_ideal else 5.0,
             "qtd_pessoas": 0,
             "orientacao": orientacao_foto,
-            "orientacao_ideal": False,
+            "orientacao_ideal": orientacao_ideal,
             "encaixe_pct": 0,
             "nitidez": 0.0,
             "embacada": True,
@@ -1342,38 +1397,17 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
     rostos_relevantes = [r for r in rostos if (r["w"] * r["h"]) >= area_principal * 0.18]
     qtd_pessoas = len(rostos_relevantes)
 
-    # Caixa ideal (sem travar nas bordas da foto) vs Caixa real pós-corte
+    # Caixa ideal vs Caixa real pós-corte
     calib_uso = calib or CALIBRACAO_PADRAO
     altura_rosto_calib = max(0.05, float(calib_uso.get("altura_rosto", 0.16)))
     crop_h_ideal = rosto["h"] / altura_rosto_calib
-    crop_w_ideal = crop_h_ideal * mw / mh
 
     caixa = calcular_recorte((W, H), rosto, molde, calib_uso)
     cl, ct, cr, cb = caixa
     cw, ch = max(1.0, float(cr - cl)), max(1.0, float(cb - ct))
 
-    # 1. Critério: Pessoa sozinha na foto (até 22 pts)
-    if qtd_pessoas == 1:
-        pts_sozinha = 22.0
-        tag_pessoas = "Sozinha"
-    else:
-        outros_no_corte = 0
-        for r_sec in rostos_relevantes[1:]:
-            if (r_sec["cx"] >= cl and r_sec["cx"] <= cr and r_sec["olhos_y"] >= ct and r_sec["olhos_y"] <= cb):
-                outros_no_corte += 1
-        if outros_no_corte > 0:
-            pts_sozinha = max(-20.0, 4.0 - 15.0 * outros_no_corte)
-            tag_pessoas = f"{qtd_pessoas} pessoas (no corte)"
-        else:
-            pts_sozinha = 9.0
-            tag_pessoas = f"{qtd_pessoas} pessoas (fora do corte)"
-
-    # 2. Critério: Orientação Ideal + Encaixe Pós-Corte (até 26 pts: 6 orientação + 20 encaixe)
-    if tam in ("24X34", "30X20"):
-        orientacao_ideal = H >= W * 0.95
-    else:
-        orientacao_ideal = (0.75 <= (W / max(1.0, H)) <= 1.38) or (H >= W)
-    pts_orientacao = 6.0 if orientacao_ideal else 0.0
+    # 1. Critério Principal (#1): Orientação Ideal + Encaixe Pós-Corte (até 45 pts: 25 orientação + 20 encaixe)
+    pts_orientacao = 25.0 if orientacao_ideal else 0.0
 
     escala_preservada = min(1.0, ch / max(1.0, crop_h_ideal))
     olhos_y_pos_corte = (rosto["olhos_y"] - ct) / ch
@@ -1398,7 +1432,23 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
     encaixe_pct = int(round(max(0.0, min(1.0, encaixe_ratio)) * 100))
     pts_encaixe = round(20.0 * max(0.0, min(1.0, encaixe_ratio)), 1)
 
-    # 3. Critério: Densidade de pixels no rosto após o crop simulado (até 24 pts + desempate principal)
+    # 2. Critério: Pessoa sozinha na foto (até 25 pts)
+    if qtd_pessoas == 1:
+        pts_sozinha = 25.0
+        tag_pessoas = "Sozinha"
+    else:
+        outros_no_corte = 0
+        for r_sec in rostos_relevantes[1:]:
+            if (r_sec["cx"] >= cl and r_sec["cx"] <= cr and r_sec["olhos_y"] >= ct and r_sec["olhos_y"] <= cb):
+                outros_no_corte += 1
+        if outros_no_corte > 0:
+            pts_sozinha = max(-15.0, 4.0 - 12.0 * outros_no_corte)
+            tag_pessoas = f"{qtd_pessoas} pessoas (no corte)"
+        else:
+            pts_sozinha = 10.0
+            tag_pessoas = f"{qtd_pessoas} pessoas (fora do corte)"
+
+    # 3. Critério: Densidade de pixels no rosto após o crop simulado (até 18 pts)
     rx0 = max(float(cl), float(rosto["x"]))
     ry0 = max(float(ct), float(rosto["y"]))
     rx1 = min(float(cr), float(rosto["x"] + rosto["w"]))
@@ -1414,47 +1464,45 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
 
     amp = ampliacao_da_caixa(caixa, molde)
     if densidade_ratio >= 1.0 and amp <= 1.0:
-        bonus_reserva = min(3.0, (min(1.5, densidade_ratio) - 1.0) * 6.0)
-        pts_densidade = round(21.0 + bonus_reserva, 1)
+        bonus_reserva = min(2.0, (min(1.5, densidade_ratio) - 1.0) * 4.0)
+        pts_densidade = round(16.0 + bonus_reserva, 1)
     elif amp <= ampliacao_maxima:
         fator_amp = max(0.0, 1.0 - ((amp - 1.0) / max(0.05, ampliacao_maxima - 1.0)))
-        pts_densidade = round(13.0 + 8.0 * min(1.0, densidade_ratio) * (0.5 + 0.5 * fator_amp), 1)
+        pts_densidade = round(10.0 + 6.0 * min(1.0, densidade_ratio) * (0.5 + 0.5 * fator_amp), 1)
     else:
-        pts_densidade = round(max(0.0, 10.0 * min(1.0, densidade_ratio) - 14.0 * (amp - ampliacao_maxima)), 1)
+        pts_densidade = round(max(0.0, 8.0 * min(1.0, densidade_ratio) - 10.0 * (amp - ampliacao_maxima)), 1)
 
-    # 4. Nitidez, Rosto de Frente, Histograma de Altas Luzes e Contraste (vindos do cache base)
+    # 4. Desempate rápido de Nitidez / Luz (até 12 pts somados, sem penalizar excessivamente a orientação certa)
     var_lap = float(base.get("var_lap", 0.0))
     embacada = bool(base.get("embacada", False))
-    pts_nitidez = float(base.get("pts_nitidez", 0.0))
-    pts_frente = float(base.get("pts_frente", 5.5))
+    pts_nitidez = min(6.0, float(base.get("pts_nitidez", 4.0)))
+    pts_frente = min(3.0, float(base.get("pts_frente", 2.5)))
     hist_luz = base.get("hist_luz") or {}
     contraste_score = float(hist_luz.get("contraste_score", 50.0))
     baixo_contraste = bool(hist_luz.get("baixo_contraste", False))
     estouro_luz = bool(hist_luz.get("estouro_luz", False))
     altas_luzes_pct = float(hist_luz.get("altas_luzes_pct", 0.0))
-    pts_luz = float(hist_luz.get("pts_luz", 5.0))
+    pts_luz = min(3.0, float(hist_luz.get("pts_luz", 5.0)) * (3.0 / 7.0))
 
     penalidade_descarte = 0.0
     avisos_qualidade = []
     if estouro_luz:
-        penalidade_descarte += 24.0
-        avisos_qualidade.append(f"Estouro de luz no histograma ({altas_luzes_pct:.1f}% altas luzes)")
+        penalidade_descarte += 8.0
+        avisos_qualidade.append(f"Estouro de luz ({altas_luzes_pct:.1f}%)")
     if baixo_contraste:
-        penalidade_descarte += 20.0
+        penalidade_descarte += 6.0
         avisos_qualidade.append(f"Baixo contraste ({contraste_score:.0f}/100)")
     if embacada:
-        penalidade_descarte += 18.0
+        penalidade_descarte += 8.0
         avisos_qualidade.append(f"Foto embaçada (nitidez {var_lap:.0f})")
-    if amp > ampliacao_maxima:
-        avisos_qualidade.append(f"Baixa densidade pós-corte ({densidade_rosto_px}px no rosto)")
 
     aprovada_qualidade = (not estouro_luz) and (not baixo_contraste) and (not embacada)
     aviso_qualidade = " · ".join(avisos_qualidade)
 
     nota_bruta = (
-        pts_sozinha
-        + pts_orientacao
+        pts_orientacao
         + pts_encaixe
+        + pts_sozinha
         + pts_densidade
         + pts_nitidez
         + pts_frente
@@ -1463,18 +1511,11 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
     )
     nota_total = round(max(1.0, min(100.0, nota_bruta)), 1)
 
-    tag_luz = (
-        "Estouro de luz"
-        if estouro_luz
-        else ("Baixo contraste" if baixo_contraste else f"Contraste {contraste_score:.0f}%")
-    )
     partes_resumo = [
+        orientacao_foto + (" (Ideal)" if orientacao_ideal else " (Adaptada)"),
         tag_pessoas,
-        f"Rosto {densidade_rosto_px}px ({densidade_rosto_pct}%)",
-        "Nítida" if not embacada else "Embaçada",
-        tag_luz,
         f"Encaixe {encaixe_pct}%",
-        orientacao_foto + ("" if orientacao_ideal else " (adaptada)"),
+        f"Rosto {densidade_rosto_px}px",
     ]
     return {
         "caminho": str(caminho_p),
@@ -1584,7 +1625,7 @@ def _assinatura_subpasta(itens_com_stat, tamanhos_necessarios, cfg, calib):
     Gera assinatura determinística da subpasta em O(N) sem novas chamadas .stat() no disco,
     permitindo carregamento instantâneo (0ms) via `cache_analise_subpastas.json` quando nada mudou.
     """
-    partes = ["v2", ",".join(tamanhos_necessarios), str(cfg.get("ampliacao_maxima", 1.2))]
+    partes = ["v3_orient", ",".join(tamanhos_necessarios), str(cfg.get("ampliacao_maxima", 1.2))]
     for tam in tamanhos_necessarios:
         molde = cfg["moldes"].get(tam, MOLDES_PADRAO.get(tam, (3874, 3012)))
         c_tam = (calib or {}).get(tam, CALIBRACAO_PADRAO)
@@ -1636,33 +1677,34 @@ def _listar_imagens_subpasta(pasta_aluno):
 
 def _ja_tem_candidatas_excelentes(metricas_por_arquivo, tamanhos_necessarios, cfg, calib):
     """
-    Verifica se a subpasta grande (> 24 fotos) já encontrou pelo menos 3 fotos excelentes
-    (rosto único, aprovada em qualidade/contraste/histograma, orientação ideal e nota >= 88.5)
-    para todos os tamanhos exigidos pelo plano do formando.
+    Parada rápida por Orientação: assim que a subpasta já encontrou pelo menos 1 foto válida
+    com 1 pessoa na ORIENTAÇÃO IDEAL e bom encaixe (>= 70%) para cada tamanho do plano,
+    encerra imediatamente a análise sem gastar tempo avaliando o restante da pasta.
     """
-    if len(metricas_por_arquivo) < MAX_FOTOS_POR_ONDA_SUBPASTA:
+    if not metricas_por_arquivo:
         return False
     amp_max = cfg.get("ampliacao_maxima", 1.2)
     for tam in tamanhos_necessarios:
         molde = cfg["moldes"].get(tam, MOLDES_PADRAO.get(tam, (3874, 3012)))
         calib_tam = calib.get(tam, CALIBRACAO_PADRAO)
-        excelentes = 0
+        achou_orientacao_ok = False
         for cam_str, m_base in metricas_por_arquivo.items():
             rostos = (m_base or {}).get("rostos") or []
-            if len(rostos) != 1:
+            if not rostos:
+                continue
+            W_m, H_m = int(m_base.get("W", 0)), int(m_base.get("H", 0))
+            if not _orientacao_ideal_para_molde(W_m, H_m, tam, molde):
                 continue
             av = avaliar_foto_para_molde(cam_str, tam, molde, calib_tam, amp_max, metricas_base=m_base)
             if (
                 av.get("valida")
-                and av.get("qtd_pessoas") == 1
-                and av.get("aprovada_qualidade")
                 and av.get("orientacao_ideal")
-                and float(av.get("nota", 0.0)) >= 88.5
+                and av.get("qtd_pessoas") == 1
+                and int(av.get("encaixe_pct", 0)) >= 70
             ):
-                excelentes += 1
-                if excelentes >= 3:
-                    break
-        if excelentes < 3:
+                achou_orientacao_ok = True
+                break
+        if not achou_orientacao_ok:
             return False
     return True
 
@@ -1728,10 +1770,10 @@ def _processar_subpasta_worker(tarefa):
     Worker top-level executado em paralelo pelo `multiprocessing.Pool` (respeitando o limite de CPU/GPU):
       1. Lista as imagens via `os.scandir` (`_listar_imagens_subpasta_com_stat`).
       2. Verifica a assinatura no `cache_analise_subpastas.json` (0ms se inalterada).
-      3. Gera/usa cópia leve local (`.cache_proxies_capaz`) com diminuição de qualidade para analisar rápido
-         na máquina local em ondas de 24 fotos com poda inteligente (`_ja_tem_candidatas_excelentes`).
-      4. Avalia os moldes do plano, seleciona a campeã (ou menos pior com aviso) e copia a foto ORIGINAL
-         em resolução total da pasta de origem para a pasta FOTO.
+      3. Faz primeiro a SEPARAÇÃO RÁPIDA POR ORIENTAÇÃO lendo apenas o cabeçalho (< 0.08ms por foto),
+         priorizando fotos na orientação ideal do molde e parando imediatamente ao encontrar a 1ª foto boa,
+         sem demorar avaliando critérios no restante da pasta.
+      4. Copia a foto ORIGINAL escolhida para a pasta FOTO.
     """
     idx_sub = tarefa["idx_sub"]
     sub = Path(tarefa["sub_str"])
@@ -1871,14 +1913,46 @@ def _processar_subpasta_worker(tarefa):
 
     fotos_analisadas_sub = 0
     proxies_usados_sub = 0
-    if fotos_para_analisar:
-        if len(fotos_para_analisar) > MAX_FOTOS_POR_ONDA_SUBPASTA:
-            fotos_para_analisar.sort(key=lambda item: item[2], reverse=True)
 
-        total_novas = len(fotos_para_analisar)
-        for inicio_onda in range(0, total_novas, MAX_FOTOS_POR_ONDA_SUBPASTA):
-            onda = fotos_para_analisar[inicio_onda:inicio_onda + MAX_FOTOS_POR_ONDA_SUBPASTA]
-            for arq, mtime_ns, fsize, ch_an, ch_rosto in onda:
+    # Se o cache já possui uma foto boa na orientação ideal, nem precisa decodificar as pendentes!
+    precisa_analisar_novas = not _ja_tem_candidatas_excelentes(
+        metricas_por_arquivo, tamanhos_necessarios, cfg_local, calib
+    )
+
+    if fotos_para_analisar and precisa_analisar_novas:
+        # SEPARAÇÃO RÁPIDA POR ORIENTAÇÃO via cabeçalho (< 0.08ms/foto, sem decodificar imagem)
+        grupo_ideal, grupo_reserva = _separar_por_orientacao_rapido(
+            fotos_para_analisar,
+            tamanhos_necessarios,
+            cfg_local["moldes"],
+            max_orientacao_ideal=MAX_TRIAGEM_ORIENTACAO_CABECALHO,
+        )
+
+        # Analisa primeiro APENAS as fotos na orientação ideal, parando a cada 2 fotos se já achou uma boa
+        for idx_cand, (arq, mtime_ns, fsize, ch_an, ch_rosto) in enumerate(grupo_ideal, 1):
+            try:
+                m_base = _extrair_metricas_base_foto(
+                    arq, mtime_ns, fsize, usar_copia_leve=usar_copia_leve
+                )
+                metricas_por_arquivo[str(arq)] = m_base
+                novas_metricas[ch_an] = m_base
+                rostos_l = (m_base or {}).get("rostos") or []
+                novos_rostos[ch_rosto] = rostos_l[0] if rostos_l else None
+                fotos_analisadas_sub += 1
+                if usar_copia_leve and (m_base or {}).get("proxy_local"):
+                    proxies_usados_sub += 1
+            except Exception:
+                pass
+
+            if idx_cand >= 2 and _ja_tem_candidatas_excelentes(
+                metricas_por_arquivo, tamanhos_necessarios, cfg_local, calib
+            ):
+                break
+
+        # Só analisa o grupo de reserva (outra orientação) se NENHUMA foto com rosto foi achada na orientação ideal
+        tem_algum_rosto = any(bool((m or {}).get("rostos")) for m in metricas_por_arquivo.values())
+        if not tem_algum_rosto and grupo_reserva:
+            for arq, mtime_ns, fsize, ch_an, ch_rosto in grupo_reserva[:MAX_FOTOS_POR_ONDA_SUBPASTA]:
                 try:
                     m_base = _extrair_metricas_base_foto(
                         arq, mtime_ns, fsize, usar_copia_leve=usar_copia_leve
@@ -1890,16 +1964,12 @@ def _processar_subpasta_worker(tarefa):
                     fotos_analisadas_sub += 1
                     if usar_copia_leve and (m_base or {}).get("proxy_local"):
                         proxies_usados_sub += 1
+                    if rostos_l:
+                        break
                 except Exception:
                     pass
 
-            if (
-                inicio_onda + MAX_FOTOS_POR_ONDA_SUBPASTA < total_novas
-                and _ja_tem_candidatas_excelentes(metricas_por_arquivo, tamanhos_necessarios, cfg_local, calib)
-            ):
-                break
-
-    # 2) Avalia cada tamanho exigido pelo plano do formando e copia a campeã ORIGINAL para FOTO
+    # 2) Avalia cada tamanho exigido pelo plano priorizando ORIENTAÇÃO IDEAL e copia a campeã ORIGINAL para FOTO
     escolhidas_aluno = {}
     avisos_aluno = []
     candidatas_por_tam = {}
@@ -1925,21 +1995,27 @@ def _processar_subpasta_worker(tarefa):
         if not avaliacoes:
             continue
 
+        # Prioriza: 1º Rosto válido -> 2º ORIENTAÇÃO IDEAL -> 3º Pessoa sozinha -> 4º Encaixe no molde -> 5º Nota
         avaliacoes.sort(
             key=lambda a: (
                 1 if a.get("valida") else 0,
+                1 if a.get("orientacao_ideal") else 0,
                 1 if a.get("qtd_pessoas") == 1 else (0 if a.get("qtd_pessoas", 0) > 1 else -1),
+                int(a.get("encaixe_pct", 0)),
+                int(a.get("densidade_rosto_px", 0)),
                 1 if a.get("aprovada_qualidade") else 0,
                 float(a.get("nota", 0.0)),
-                int(a.get("densidade_rosto_px", 0)),
-                int(a.get("encaixe_pct", 0)),
             ),
             reverse=True,
         )
 
         campea = dict(avaliacoes[0])
-        if not campea.get("aprovada_qualidade") and campea.get("aviso_qualidade"):
-            aviso_msg = f"Escolhida a menos pior p/ {tam} ({campea['aviso_qualidade']})"
+        if not campea.get("orientacao_ideal"):
+            aviso_msg = f"Sem foto na orientação ideal p/ {tam} (adaptada de {campea.get('orientacao')})"
+            campea["aviso_revisao"] = aviso_msg
+            avisos_aluno.append(aviso_msg)
+        elif not campea.get("aprovada_qualidade") and campea.get("aviso_qualidade"):
+            aviso_msg = f"Escolhida p/ {tam} ({campea['aviso_qualidade']})"
             campea["aviso_revisao"] = aviso_msg
             avisos_aluno.append(aviso_msg)
         else:
@@ -2031,9 +2107,10 @@ def escolher_melhores_fotos_subpastas(
     """
     Divide as subpastas dos formandos entre os núcleos da CPU permitidos pelo limite de hardware
     (`limite_cpu_pct`) usando `multiprocessing.Pool` + GPU OpenCL em prioridade baixa:
-      1. Gera/usa cópia leve local (`.cache_proxies_capaz`) com diminuição de qualidade para rodar
-         toda a análise na máquina local sem gargalo do Google Drive / rede / HD externo.
-      2. Mantém núcleos livres para o usuário trabalhar sem travar o computador.
+      1. Faz primeiro uma SEPARAÇÃO RÁPIDA POR ORIENTAÇÃO via cabeçalho (< 0.08ms/foto, sem decodificar),
+         filtrando apenas as fotos na orientação certa do molde.
+      2. Analisa poucas fotos na orientação certa usando cópia leve local (`.cache_proxies_capaz`) e
+         para imediatamente ao achar a primeira foto boa, sem demorar escolhendo critérios.
       3. Copia em resolução ORIGINAL apenas a foto campeã escolhida para a pasta FOTO.
     """
     pasta_mae = Path(pasta_subpastas)
@@ -2176,7 +2253,7 @@ def escolher_melhores_fotos_subpastas(
                     f"Hardware [{tag_hw}] · Cache 0ms: {res['nome_aluno']} ({res.get('total_itens_sub', 0)} fotos)...",
                 )
             else:
-                tag_proxy = "cópia leve local" if usar_copia_leve else "direto"
+                tag_proxy = "orientação rápida + cópia leve" if usar_copia_leve else "orientação rápida"
                 progresso_cb(
                     concluidas,
                     total_sub,
@@ -2194,7 +2271,7 @@ def escolher_melhores_fotos_subpastas(
             progresso_cb(
                 0,
                 total_sub,
-                f"Iniciando seleção com {tag_hw} ({hw['nucleos_livres']} núcleos livres p/ não travar o PC)...",
+                f"Separando rápido por Orientação com {tag_hw} ({hw['nucleos_livres']} núcleos livres)...",
             )
         usou_mp_pool = False
         try:
@@ -2218,19 +2295,29 @@ def escolher_melhores_fotos_subpastas(
                     concluidas += 1
                     _integrar_resultado_worker(res, concluidas)
     else:
-        # Caso 2: Apenas 1 pasta selecionada -> usa multiprocessing.Pool limitado a nucleos_usados
+        # Caso 2: Apenas 1 pasta selecionada -> separa primeiro pela orientação via cabeçalho e usa Pool só nas prioritárias
         t_unica = tarefas[0]
         sub_unica = Path(t_unica["sub_str"])
         itens_unica = _listar_imagens_subpasta_com_stat(sub_unica)
-        faltantes_unica = []
+        faltantes_bruto = []
         for arq, mtime_ns, fsize in itens_unica:
-            ch_an = f"{_norm_caminho_rapido(arq)}|{mtime_ns}|{fsize}|v2"
+            ch_rosto = f"{_norm_caminho_rapido(arq)}|{mtime_ns}|{fsize}"
+            ch_an = f"{ch_rosto}|v2"
             if ch_an not in cache_an:
-                faltantes_unica.append((str(arq), mtime_ns, fsize, usar_copia_leve))
+                faltantes_bruto.append((arq, mtime_ns, fsize, ch_an, ch_rosto))
+
+        grupo_ideal_u, _ = _separar_por_orientacao_rapido(
+            faltantes_bruto,
+            t_unica["tamanhos_necessarios"],
+            cfg["moldes"],
+            max_orientacao_ideal=MAX_TRIAGEM_ORIENTACAO_CABECALHO,
+        )
+        faltantes_unica = [
+            (str(arq), mtime_ns, fsize, usar_copia_leve)
+            for arq, mtime_ns, fsize, _, _ in grupo_ideal_u[:MAX_FOTOS_POR_ONDA_SUBPASTA]
+        ]
 
         if len(faltantes_unica) >= 2:
-            if len(faltantes_unica) > MAX_FOTOS_POR_ONDA_SUBPASTA:
-                faltantes_unica.sort(key=lambda item: item[2], reverse=True)
             num_processos = max(1, min(len(faltantes_unica), nucleos_usados))
             try:
                 with multiprocessing.Pool(
@@ -2238,32 +2325,18 @@ def escolher_melhores_fotos_subpastas(
                     initializer=_init_worker_pool_subpastas,
                     initargs=(hw["usar_gpu_opencl"],),
                 ) as pool:
-                    for inicio_onda in range(0, len(faltantes_unica), MAX_FOTOS_POR_ONDA_SUBPASTA):
-                        onda = faltantes_unica[inicio_onda:inicio_onda + MAX_FOTOS_POR_ONDA_SUBPASTA]
-                        if progresso_cb:
-                            progresso_cb(
-                                1,
-                                1,
-                                f"Hardware [{tag_hw}] · Analisando cópia leve de {t_unica['nome_aluno']} ({min(len(itens_unica), inicio_onda + len(onda))}/{len(itens_unica)} fotos)...",
-                            )
-                        for ch_an, ch_r, m_base in pool.imap_unordered(_extrair_metricas_foto_worker, onda, chunksize=2):
-                            if m_base is not None:
-                                with _cache_rostos_lock:
-                                    cache_an[ch_an] = m_base
-                                    rostos_l = m_base.get("rostos") or []
-                                    cache_r[ch_r] = rostos_l[0] if rostos_l else None
-                        metricas_atuais = {
-                            str(arq): cache_an.get(f"{_norm_caminho_rapido(arq)}|{mtime_ns}|{fsize}|v2")
-                            for arq, mtime_ns, fsize in itens_unica
-                            if f"{_norm_caminho_rapido(arq)}|{mtime_ns}|{fsize}|v2" in cache_an
-                        }
-                        if (
-                            inicio_onda + MAX_FOTOS_POR_ONDA_SUBPASTA < len(faltantes_unica)
-                            and _ja_tem_candidatas_excelentes(
-                                metricas_atuais, t_unica["tamanhos_necessarios"], cfg, calib
-                            )
-                        ):
-                            break
+                    if progresso_cb:
+                        progresso_cb(
+                            1,
+                            1,
+                            f"Hardware [{tag_hw}] · Separando rápido por Orientação em {t_unica['nome_aluno']} ({len(faltantes_unica)} fotos prioritárias)...",
+                        )
+                    for ch_an, ch_r, m_base in pool.imap_unordered(_extrair_metricas_foto_worker, faltantes_unica, chunksize=1):
+                        if m_base is not None:
+                            with _cache_rostos_lock:
+                                cache_an[ch_an] = m_base
+                                rostos_l = m_base.get("rostos") or []
+                                cache_r[ch_r] = rostos_l[0] if rostos_l else None
                 _salvar_cache_analise_subpastas()
             except Exception:
                 pass

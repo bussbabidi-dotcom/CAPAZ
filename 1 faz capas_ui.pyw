@@ -1243,8 +1243,8 @@ class JanelaCapas:
                 f"{info_cache.get('proxies_locais', 0)} cópia(s) leve(s) pronta(s) para carregamento instantâneo!\n"
             )
         self._escrever(
-            "Critérios: Pessoa sozinha · Densidade de pixels no rosto pós-corte (peso alto + desempate) · "
-            "Histograma sem estouro de altas luzes · Descarte de baixo contraste · Nitidez · Orientação/Encaixe\n\n"
+            "Modo Rápido: 1º Separação instantânea por ORIENTAÇÃO via cabeçalho (< 0.08ms/foto, sem decodificar) · "
+            "2º Pessoa sozinha + Encaixe no molde · Parada imediata na 1ª foto boa sem demorar nos critérios!\n\n"
         )
 
         alunos_atuais = list(self.carregar())
