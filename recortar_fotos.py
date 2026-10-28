@@ -141,8 +141,8 @@ LADO_DETECCAO = 480
 LADO_PROXY_LOCAL = 512
 QUALIDADE_PROXY_LOCAL = 68
 LADO_PREVIA_RAPIDA = 1400
-MAX_FOTOS_POR_ONDA_SUBPASTA = 6
-MAX_TRIAGEM_ORIENTACAO_CABECALHO = 10
+MAX_FOTOS_POR_ONDA_SUBPASTA = 7
+MAX_TRIAGEM_ORIENTACAO_CABECALHO = 12
 LIMITE_CPU_PCT_PADRAO = 60
 USAR_GPU_OPENCL_PADRAO = True
 USAR_COPIA_LEVE_LOCAL_PADRAO = True
@@ -1378,8 +1378,11 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
             "orientacao_ideal": orientacao_ideal,
             "encaixe_pct": 0,
             "nitidez": 0.0,
+            "nitidez_score": 0,
             "embacada": True,
             "contraste_score": 0.0,
+            "brilho_medio": 128.0,
+            "brilho_score": 50,
             "baixo_contraste": True,
             "estouro_luz": False,
             "altas_luzes_pct": 0.0,
@@ -1479,6 +1482,10 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
     pts_frente = min(3.0, float(base.get("pts_frente", 2.5)))
     hist_luz = base.get("hist_luz") or {}
     contraste_score = float(hist_luz.get("contraste_score", 50.0))
+    brilho_medio = float(hist_luz.get("brilho_medio", 132.0))
+    desvio_brilho = abs(brilho_medio - 134.0)
+    brilho_score = int(round(max(15.0, min(100.0, 100.0 - desvio_brilho * 0.75))))
+    nitidez_score = int(round(max(10.0, min(100.0, (var_lap / 180.0) * 100.0))))
     baixo_contraste = bool(hist_luz.get("baixo_contraste", False))
     estouro_luz = bool(hist_luz.get("estouro_luz", False))
     altas_luzes_pct = float(hist_luz.get("altas_luzes_pct", 0.0))
@@ -1528,8 +1535,11 @@ def avaliar_foto_para_molde(caminho, tam, molde, calib, ampliacao_maxima=1.2, me
         "orientacao_ideal": orientacao_ideal,
         "encaixe_pct": encaixe_pct,
         "nitidez": round(var_lap, 1),
+        "nitidez_score": nitidez_score,
         "embacada": embacada,
         "contraste_score": contraste_score,
+        "brilho_medio": round(brilho_medio, 1),
+        "brilho_score": brilho_score,
         "baixo_contraste": baixo_contraste,
         "estouro_luz": estouro_luz,
         "altas_luzes_pct": altas_luzes_pct,
@@ -1625,7 +1635,7 @@ def _assinatura_subpasta(itens_com_stat, tamanhos_necessarios, cfg, calib):
     Gera assinatura determinística da subpasta em O(N) sem novas chamadas .stat() no disco,
     permitindo carregamento instantâneo (0ms) via `cache_analise_subpastas.json` quando nada mudou.
     """
-    partes = ["v3_orient", ",".join(tamanhos_necessarios), str(cfg.get("ampliacao_maxima", 1.2))]
+    partes = ["v4_top7_orient", ",".join(tamanhos_necessarios), str(cfg.get("ampliacao_maxima", 1.2))]
     for tam in tamanhos_necessarios:
         molde = cfg["moldes"].get(tam, MOLDES_PADRAO.get(tam, (3874, 3012)))
         c_tam = (calib or {}).get(tam, CALIBRACAO_PADRAO)
@@ -1675,19 +1685,22 @@ def _listar_imagens_subpasta(pasta_aluno):
     return [arq for arq, _, _ in _listar_imagens_subpasta_com_stat(pasta_aluno)]
 
 
-def _ja_tem_candidatas_excelentes(metricas_por_arquivo, tamanhos_necessarios, cfg, calib):
+def _ja_tem_candidatas_excelentes(metricas_por_arquivo, tamanhos_necessarios, cfg, calib, min_candidatas=MAX_FOTOS_POR_ONDA_SUBPASTA):
     """
-    Parada rápida por Orientação: assim que a subpasta já encontrou pelo menos 1 foto válida
-    com 1 pessoa na ORIENTAÇÃO IDEAL e bom encaixe (>= 70%) para cada tamanho do plano,
+    Parada rápida por Orientação para as 7 melhores: assim que a subpasta já reuniu `min_candidatas`
+    fotos válidas na ORIENTAÇÃO IDEAL (ou pelo menos 1 excelente quando a pasta tem poucas fotos),
     encerra imediatamente a análise sem gastar tempo avaliando o restante da pasta.
     """
     if not metricas_por_arquivo:
+        return False
+    alvo_qtd = max(1, int(min_candidatas or MAX_FOTOS_POR_ONDA_SUBPASTA))
+    if len(metricas_por_arquivo) < alvo_qtd:
         return False
     amp_max = cfg.get("ampliacao_maxima", 1.2)
     for tam in tamanhos_necessarios:
         molde = cfg["moldes"].get(tam, MOLDES_PADRAO.get(tam, (3874, 3012)))
         calib_tam = calib.get(tam, CALIBRACAO_PADRAO)
-        achou_orientacao_ok = False
+        qtd_orientacao_ok = 0
         for cam_str, m_base in metricas_por_arquivo.items():
             rostos = (m_base or {}).get("rostos") or []
             if not rostos:
@@ -1696,15 +1709,11 @@ def _ja_tem_candidatas_excelentes(metricas_por_arquivo, tamanhos_necessarios, cf
             if not _orientacao_ideal_para_molde(W_m, H_m, tam, molde):
                 continue
             av = avaliar_foto_para_molde(cam_str, tam, molde, calib_tam, amp_max, metricas_base=m_base)
-            if (
-                av.get("valida")
-                and av.get("orientacao_ideal")
-                and av.get("qtd_pessoas") == 1
-                and int(av.get("encaixe_pct", 0)) >= 70
-            ):
-                achou_orientacao_ok = True
-                break
-        if not achou_orientacao_ok:
+            if av.get("valida") and av.get("orientacao_ideal") and int(av.get("encaixe_pct", 0)) >= 68:
+                qtd_orientacao_ok += 1
+                if qtd_orientacao_ok >= min(alvo_qtd, 3):
+                    break
+        if qtd_orientacao_ok == 0:
             return False
     return True
 
@@ -1914,9 +1923,10 @@ def _processar_subpasta_worker(tarefa):
     fotos_analisadas_sub = 0
     proxies_usados_sub = 0
 
-    # Se o cache já possui uma foto boa na orientação ideal, nem precisa decodificar as pendentes!
+    alvo_top_sub = min(MAX_FOTOS_POR_ONDA_SUBPASTA, len(itens_sub))
+    # Se o cache já possui as 7 candidatas na orientação ideal, nem precisa decodificar as pendentes!
     precisa_analisar_novas = not _ja_tem_candidatas_excelentes(
-        metricas_por_arquivo, tamanhos_necessarios, cfg_local, calib
+        metricas_por_arquivo, tamanhos_necessarios, cfg_local, calib, min_candidatas=alvo_top_sub
     )
 
     if fotos_para_analisar and precisa_analisar_novas:
@@ -1928,7 +1938,7 @@ def _processar_subpasta_worker(tarefa):
             max_orientacao_ideal=MAX_TRIAGEM_ORIENTACAO_CABECALHO,
         )
 
-        # Analisa primeiro APENAS as fotos na orientação ideal, parando a cada 2 fotos se já achou uma boa
+        # Analisa primeiro as fotos na orientação ideal até completar as 7 melhores opções para escolha rápida
         for idx_cand, (arq, mtime_ns, fsize, ch_an, ch_rosto) in enumerate(grupo_ideal, 1):
             try:
                 m_base = _extrair_metricas_base_foto(
@@ -1944,15 +1954,17 @@ def _processar_subpasta_worker(tarefa):
             except Exception:
                 pass
 
-            if idx_cand >= 2 and _ja_tem_candidatas_excelentes(
-                metricas_por_arquivo, tamanhos_necessarios, cfg_local, calib
+            if len(metricas_por_arquivo) >= alvo_top_sub and _ja_tem_candidatas_excelentes(
+                metricas_por_arquivo, tamanhos_necessarios, cfg_local, calib, min_candidatas=alvo_top_sub
             ):
                 break
 
-        # Só analisa o grupo de reserva (outra orientação) se NENHUMA foto com rosto foi achada na orientação ideal
+        # Se a subpasta tinha menos de 7 fotos na orientação ideal, completa até 7 com o grupo de reserva
+        faltam_para_7 = max(0, MAX_FOTOS_POR_ONDA_SUBPASTA - len(metricas_por_arquivo))
         tem_algum_rosto = any(bool((m or {}).get("rostos")) for m in metricas_por_arquivo.values())
-        if not tem_algum_rosto and grupo_reserva:
-            for arq, mtime_ns, fsize, ch_an, ch_rosto in grupo_reserva[:MAX_FOTOS_POR_ONDA_SUBPASTA]:
+        if (faltam_para_7 > 0 or not tem_algum_rosto) and grupo_reserva:
+            limite_reserva = max(faltam_para_7, 2) if faltam_para_7 > 0 else MAX_FOTOS_POR_ONDA_SUBPASTA
+            for arq, mtime_ns, fsize, ch_an, ch_rosto in grupo_reserva[:limite_reserva]:
                 try:
                     m_base = _extrair_metricas_base_foto(
                         arq, mtime_ns, fsize, usar_copia_leve=usar_copia_leve
@@ -1964,7 +1976,7 @@ def _processar_subpasta_worker(tarefa):
                     fotos_analisadas_sub += 1
                     if usar_copia_leve and (m_base or {}).get("proxy_local"):
                         proxies_usados_sub += 1
-                    if rostos_l:
+                    if len(metricas_por_arquivo) >= MAX_FOTOS_POR_ONDA_SUBPASTA and (tem_algum_rosto or rostos_l):
                         break
                 except Exception:
                     pass
@@ -2044,7 +2056,7 @@ def _processar_subpasta_worker(tarefa):
         except Exception:
             pass
 
-        top_candidatas = avaliacoes[:6]
+        top_candidatas = avaliacoes[:7]
         candidatas_por_tam[tam] = top_candidatas
         chave_op = f"{ch_aluno}|{tam}"
         opcoes_aluno[chave_op] = {
@@ -2359,7 +2371,7 @@ def escolher_melhores_fotos_subpastas(
 
 
 def trocar_foto_por_opcao(nome_aluno, tam, caminho_origem, cfg):
-    """Substitui na pasta FOTO a foto do aluno pela candidata escolhida na troca rápida da Revisão."""
+    """Substitui na pasta FOTO a foto do aluno pela candidata escolhida na tela das 7 melhores ou na Revisão."""
     origem = Path(caminho_origem)
     if not origem.is_file():
         raise FileNotFoundError("Foto candidata não encontrada: " + str(origem))
@@ -2377,15 +2389,90 @@ def trocar_foto_por_opcao(nome_aluno, tam, caminho_origem, cfg):
 
     opcoes = ler_opcoes_foto()
     chave_op = f"{chave(nome_aluno)}|{tam}"
+    cand_match = None
     if chave_op in opcoes:
         opcoes[chave_op]["escolhida"] = str(origem)
         cand_match = next(
             (c for c in (opcoes[chave_op].get("candidatas") or []) if str(c.get("caminho")) == str(origem)),
             None,
         )
-        opcoes[chave_op]["aviso_revisao"] = (cand_match or {}).get("aviso_qualidade", "") if cand_match and not cand_match.get("aprovada_qualidade") else ""
+        opcoes[chave_op]["aviso_revisao"] = (
+            (cand_match or {}).get("aviso_qualidade", "")
+            if cand_match and not cand_match.get("aprovada_qualidade")
+            else ""
+        )
         gravar_opcoes_foto(opcoes)
+
+    # Atualiza também o cache_analise_subpastas.json para lembrar a escolhida entre as 7 melhores
+    try:
+        cache_an = _carregar_cache_analise_subpastas()
+        subpastas_map = cache_an.get("_subpastas") or {}
+        norm_sub = _norm_caminho_rapido(origem.parent)
+        reg_sub = subpastas_map.get(norm_sub)
+        if isinstance(reg_sub, dict) and isinstance(reg_sub.get("escolhidas"), dict) and cand_match:
+            reg_sub["escolhidas"][tam] = dict(cand_match)
+            _salvar_cache_analise_subpastas()
+    except Exception:
+        pass
     return destino
+
+
+def obter_miniatura_candidata_rapida(caminho_foto, tam, cfg, calib=None, caixa_sugerida=None, lado_max=220, modo="recorte"):
+    """
+    Carrega em ~2-5ms a miniatura de uma das 7 melhores fotos candidatas (usando `.cache_proxies_capaz`
+    quando disponível ou `abrir_foto_previa_rapida`) para exibir na Tela de Escolha entre as 7 Melhores:
+      - `modo="recorte"`: retorna a foto já simulando o enquadramento no molde da capa (`20X20`, `30X20`, `24X34`).
+      - `modo="inteira"`: retorna a foto inteira com o retângulo amarelo (`#FDE047`) do corte e linha azul dos olhos.
+    """
+    caminho_p = Path(caminho_foto)
+    molde = cfg["moldes"].get(tam, MOLDES_PADRAO.get(tam, (3874, 3012)))
+    calib_tam = (calib or {}).get(tam, CALIBRACAO_PADRAO)
+
+    img_red = None
+    tam_orig = None
+    try:
+        st = caminho_p.stat()
+        proxy_p = _obter_ou_criar_proxy_local(caminho_p, st.st_mtime_ns, st.st_size)
+        if proxy_p and Path(proxy_p).is_file():
+            with Image.open(proxy_p) as im_p:
+                img_red = im_p.convert("RGB")
+            tam_orig = tamanho_rapido(caminho_p)
+    except Exception:
+        img_red = None
+
+    if img_red is None:
+        img_red, tam_orig, _ = abrir_foto_previa_rapida(caminho_p, max(512, lado_max * 2))
+
+    W_orig, H_orig = tam_orig if tam_orig else img_red.size
+    if caixa_sugerida and len(caixa_sugerida) == 4:
+        caixa = tuple(int(round(v)) for v in caixa_sugerida)
+    else:
+        rosto = detectar_rosto_cache(caminho_p)
+        caixa = (
+            calcular_recorte((W_orig, H_orig), rosto, molde, calib_tam)
+            if rosto
+            else ajustar_caixa((0, 0, W_orig, H_orig), (W_orig, H_orig), molde)
+        )
+
+    fx = img_red.width / float(max(1, W_orig))
+    fy = img_red.height / float(max(1, H_orig))
+    cl = max(0, min(img_red.width - 1, int(round(caixa[0] * fx))))
+    ct = max(0, min(img_red.height - 1, int(round(caixa[1] * fy))))
+    cr = max(cl + 1, min(img_red.width, int(round(caixa[2] * fx))))
+    cb = max(ct + 1, min(img_red.height, int(round(caixa[3] * fy))))
+
+    if modo == "inteira":
+        vis = img_red.copy()
+        draw = ImageDraw.Draw(vis)
+        draw.rectangle((cl, ct, cr, cb), outline="#FDE047", width=max(2, round(vis.width / 110)))
+        oy = int(round(ct + (cb - ct) * calib_tam.get("olhos_y", 0.38)))
+        draw.line((cl, oy, cr, oy), fill="#38BDF8", width=max(1, round(vis.width / 160)))
+        vis.thumbnail((lado_max, lado_max), Image.BILINEAR)
+        return vis
+
+    rec = img_red.crop((cl, ct, cr, cb))
+    rec.thumbnail((lado_max, lado_max), Image.BILINEAR)
+    return rec
 
 
 def abrir_foto(caminho):
