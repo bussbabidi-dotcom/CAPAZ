@@ -141,8 +141,9 @@ CABECALHO_CURSO = {
 }
 
 CABECALHO_PLANO = {
-    "PLANO", "ALBUM", "PRODUTO", "TIPO",
-    "TIPO DE ALBUM",
+    "PLANO", "PLANOS", "ALBUM", "PRODUTO", "TIPO",
+    "TIPO DE ALBUM", "PACOTE", "MODELO", "TAMANHO",
+    "FORMATO", "BOOK", "LIVRO", "CAPA",
 }
 
 
@@ -164,6 +165,8 @@ def _detectar_cabecalho(celulas):
 
     if "nome" in colunas and "plano" in colunas:
         return colunas
+    if len(celulas) == 1 and "plano" in colunas:
+        return colunas
 
     return None
 
@@ -175,6 +178,16 @@ RE_TOKEN_TAMANHO = re.compile(
     r"(?:\s*\(\d+\))?"
     r"[\)\]\}\s_\-\.]*(?!\d)"
 )
+RE_TOKEN_PLANO = re.compile(
+    r"(?i)\b(?:"
+    r"studio\s+day\s+(?:moscou|moskow|moscovo|berlim|berlin)"
+    r"|pacote\s+(?:berlim|berlin|moscou|moskow)"
+    r"|prime\s+book"
+    r"|essencial\s+book|essential\s+book"
+    r"|diamond\s+book|diamante\s+book"
+    r"|(?:moscou|moskow|moscovo|berlim|berlin|diamond|diamante|essencial|essential|prime)\s*(?=(?:20\s*[x×*]\s*20|24\s*[x×*]\s*34|34\s*[x×*]\s*24|30\s*[x×*]\s*20|20\s*[x×*]\s*30|30\s*[x×*]\s*22)\b)"
+    r")\b"
+)
 
 PLANO_PADRAO_POR_TAMANHO = {
     "24X34": "Studio Day Berlim 24x34",
@@ -182,6 +195,17 @@ PLANO_PADRAO_POR_TAMANHO = {
     "30X22": "Prime Book 30X22",
     "30X20": "Prime Book 30X20",
 }
+
+PLANOS_PADRAO_UI = (
+    "Prime Book 30X20",
+    "Studio Day Moscou 30x20",
+    "Moscou 30X20",
+    "Essencial Book 20x20",
+    "Studio Day Berlim 24x34",
+    "Pacote Berlim 24x34",
+    "Diamond Book 24X34",
+    "Prime Book 30X22",
+)
 
 
 def extrair_tamanho_do_texto(texto):
@@ -198,28 +222,77 @@ def extrair_tamanho_do_texto(texto):
     return None
 
 
+def extrair_plano_do_texto(texto):
+    """
+    Reconhece o plano completo a partir do texto (ex.: 'Prime Book 30X20', 'Studio Day Moscou 30x20',
+    'Moscou 30X20', 'Essencial Book 20x20', 'Studio Day Berlim 24x34', 'Pacote Berlim 24x34',
+    'Diamond Book 24X34', 'Prime Book 30X22') ou pelo sufixo de tamanho.
+    """
+    ch = chave(texto or "")
+    if not ch:
+        return None
+    compacto = re.sub(r"[\s_\-\.]+", "", ch).replace("×", "X").replace("*", "X")
+    if "30X22" in compacto:
+        return "Prime Book 30X22"
+    if "STUDIO DAY" in ch and any(p in ch for p in ("MOSCOU", "MOSKOW", "MOSCOVO")):
+        return "Studio Day Moscou 30x20"
+    if any(p in ch for p in ("MOSCOU", "MOSKOW", "MOSCOVO")):
+        return "Moscou 30X20"
+    if "PACOTE" in ch and any(p in ch for p in ("BERLIM", "BERLIN", "24X34", "34X24")):
+        return "Pacote Berlim 24x34"
+    if "STUDIO DAY" in ch and any(p in ch for p in ("BERLIM", "BERLIN", "24X34", "34X24")):
+        return "Studio Day Berlim 24x34"
+    if any(p in ch for p in ("DIAMOND", "DIAMANTE")):
+        return "Diamond Book 24X34"
+    if any(p in ch for p in ("BERLIM", "BERLIN")):
+        return "Studio Day Berlim 24x34"
+    if any(p in ch for p in ("ESSENCIAL", "ESSENTIAL")):
+        return "Essencial Book 20x20"
+    if "PRIME" in ch:
+        return "Prime Book 30X20"
+    tam = extrair_tamanho_do_texto(texto)
+    if tam:
+        return PLANO_PADRAO_POR_TAMANHO.get(tam)
+    return None
+
+
 def limpar_tamanho_do_nome(nome):
-    """Remove qualquer sufixo/token de tamanho (ex.: 24X34, 34X24, 20X20, 30X20, 30X22) e extensão do nome do aluno."""
+    """Remove qualquer sufixo/token de plano ou tamanho (ex.: 24X34, Pacote Berlim 24x34, Studio Day Moscou 30x20) e extensão do nome do aluno."""
     texto = str(nome or "").strip()
     texto = RE_EXTENSAO_IMAGEM.sub("", texto)
+    texto = RE_TOKEN_PLANO.sub(" ", texto)
     texto = RE_TOKEN_TAMANHO.sub(" ", texto)
     texto = re.sub(r"[_\-]+", " ", texto)
-    return re.sub(r"\s+", " ", texto).strip()
+    texto = re.sub(r"\s+", " ", texto).strip()
+    if chave(texto) in {"MOSCOU", "MOSKOW", "MOSCOVO", "BERLIM", "BERLIN", "PRIME", "ESSENCIAL", "ESSENTIAL", "DIAMOND", "DIAMANTE", "STUDIO DAY", "PACOTE", "BOOK"}:
+        return ""
+    return texto
+
+
+def eh_apenas_plano(texto):
+    """Retorna True se o texto for exclusivamente o nome de um plano/tamanho (sem nome de aluno)."""
+    if not str(texto or "").strip():
+        return False
+    return bool(extrair_plano_do_texto(texto)) and not bool(limpar_tamanho_do_nome(texto))
 
 
 def formatar_nome(nome):
-    """Só a primeira letra de cada palavra maiúscula e sem o tamanho (24X34 / 20X20 / 30X20): "MARIA DA SILVA 24X34" -> "Maria Da Silva"."""
+    """Só a primeira letra de cada palavra maiúscula e sem o tamanho/plano: "MARIA DA SILVA 24X34" -> "Maria Da Silva"."""
     texto = limpar_tamanho_do_nome(nome)
     return re.sub(r"[^\W\d_]+", lambda m: m.group(0)[0].upper() + m.group(0)[1:].lower(), texto)
 
 
-def interpretar_colagem(texto):
+def interpretar_colagem(texto, alunos_existentes=None):
     """
     Converte o texto colado do Excel em lista de alunos.
 
     Cada aluno: {"linha": n, "nome": ..., "curso": ..., "plano": ...}
     "linha" é o número que o script vai usar (cabeçalho na 1, alunos a partir da 2).
-    Se o tamanho (ex.: 24X34) estiver junto do nome, remove-o do nome e preenche o plano se estiver vazio.
+    Reconhece automaticamente:
+      - Colagens de 3 colunas (NOME | CURSO | PLANO ou NOME | PLANO | CURSO)
+      - Colagens de 2 colunas (NOME | PLANO ou NOME | CURSO)
+      - Colagens de 1 coluna com Nome + Plano na mesma linha
+      - Colagens de 1 coluna contendo APENAS planos (aplica os planos na ordem aos alunos_existentes!)
     """
 
     linhas = [
@@ -239,6 +312,29 @@ def interpretar_colagem(texto):
         colunas = cabecalho
         linhas = linhas[1:]
 
+    if not linhas:
+        return []
+
+    # Caso especial: todas as linhas coladas são APENAS nomes de planos (ex.: colou a coluna PLANO do Excel)
+    if all( len(l.split("\t")) == 1 and eh_apenas_plano(l) for l in linhas ):
+        planos_colados = [extrair_plano_do_texto(l) or l.strip() for l in linhas]
+        base = [dict(a) for a in (alunos_existentes or []) if a.get("nome")]
+        if base:
+            resultado = []
+            for idx, a in enumerate(base):
+                novo_plano = planos_colados[idx] if idx < len(planos_colados) else (a.get("plano") or planos_colados[-1])
+                resultado.append({
+                    "linha": idx + 2,
+                    "nome": a["nome"],
+                    "curso": a.get("curso") or "",
+                    "plano": novo_plano,
+                })
+            return resultado
+        return [
+            {"linha": idx + 2, "nome": "", "curso": "", "plano": p}
+            for idx, p in enumerate(planos_colados)
+        ]
+
     def pegar(celulas, campo):
         i = colunas.get(campo)
         if i is None or i >= len(celulas):
@@ -249,18 +345,55 @@ def interpretar_colagem(texto):
 
     for numero, linha in enumerate(linhas, start=2):
 
-        celulas = linha.split("\t")
-        bruto_nome = pegar(celulas, "nome")
-        tam_no_nome = extrair_tamanho_do_texto(bruto_nome)
+        celulas = [re.sub(r"\s+", " ", c.strip()) for c in linha.split("\t")]
+        if cabecalho:
+            bruto_nome = pegar(celulas, "nome")
+            curso_lido = pegar(celulas, "curso")
+            plano_lido = pegar(celulas, "plano")
+            if not plano_lido and curso_lido and eh_apenas_plano(curso_lido):
+                plano_lido = extrair_plano_do_texto(curso_lido) or curso_lido
+                curso_lido = ""
+        elif len(celulas) == 2:
+            # 2 colunas sem cabeçalho: pode ser NOME | PLANO ou NOME | CURSO
+            c0, c1 = celulas[0], celulas[1]
+            if eh_apenas_plano(c1):
+                bruto_nome, curso_lido, plano_lido = c0, "", (extrair_plano_do_texto(c1) or c1)
+            elif eh_apenas_plano(c0):
+                bruto_nome, curso_lido, plano_lido = c1, "", (extrair_plano_do_texto(c0) or c0)
+            else:
+                bruto_nome, curso_lido, plano_lido = c0, c1, ""
+        elif len(celulas) >= 3:
+            # 3+ colunas sem cabeçalho: detecta qual célula é o plano
+            idx_plano = None
+            for idx_c, val_c in enumerate(celulas):
+                if eh_apenas_plano(val_c):
+                    idx_plano = idx_c
+                    break
+            if idx_plano is not None:
+                plano_lido = extrair_plano_do_texto(celulas[idx_plano]) or celulas[idx_plano]
+                restantes = [c for idx_c, c in enumerate(celulas) if idx_c != idx_plano and c and not c.isdigit()]
+                bruto_nome = restantes[0] if restantes else ""
+                curso_lido = restantes[1] if len(restantes) > 1 else ""
+            else:
+                bruto_nome = pegar(celulas, "nome")
+                curso_lido = pegar(celulas, "curso")
+                plano_lido = pegar(celulas, "plano")
+        else:
+            bruto_nome = celulas[0] if celulas else ""
+            curso_lido = ""
+            plano_lido = ""
+
+        plano_no_nome = extrair_plano_do_texto(bruto_nome)
         nome_limpo = formatar_nome(bruto_nome)
-        plano_lido = pegar(celulas, "plano")
-        if not plano_lido and tam_no_nome:
-            plano_lido = PLANO_PADRAO_POR_TAMANHO.get(tam_no_nome, "")
+        if plano_lido:
+            plano_lido = extrair_plano_do_texto(plano_lido) or plano_lido
+        elif plano_no_nome:
+            plano_lido = plano_no_nome
 
         alunos.append({
             "linha": numero,
             "nome": nome_limpo,
-            "curso": pegar(celulas, "curso"),
+            "curso": curso_lido,
             "plano": plano_lido,
         })
 
@@ -1081,13 +1214,13 @@ class JanelaCapas:
                     opcoes = (
                         sorted(automacao.CURSOS.keys())
                         if eh_curso
-                        else sorted(set(automacao.MODELOS) | {"ESSENCIAL BOOK 20X20"})
+                        else list(PLANOS_PADRAO_UI)
                     )
                 except Exception:
                     opcoes = (
                         []
                         if eh_curso
-                        else ["Prime Book 30X20", "Essencial Book 20x20", "Studio Day Berlim 24x34", "Prime Book 30X22"]
+                        else list(PLANOS_PADRAO_UI)
                     )
                 atual = valores[2] if eh_curso else valores[3]
                 if atual == "(definir na Revisão)":
@@ -2171,12 +2304,7 @@ class JanelaCapas:
 
     def _listar_planos(self):
 
-        try:
-            automacao = modulo_automacao()
-            planos = set(automacao.MODELOS) | {"ESSENCIAL BOOK 20X20"}
-        except Exception:
-            planos = {"PRIME BOOK 30X20", "PRIME BOOK 30X22", "ESSENCIAL BOOK 20X20", "STUDIO DAY BERLIM 24X34"}
-        self.campo_plano_todos.configure(values=sorted(planos))
+        self.campo_plano_todos.configure(values=list(PLANOS_PADRAO_UI))
 
     def _aplicar_plano_todos(self):
 
@@ -2210,7 +2338,28 @@ class JanelaCapas:
     def carregar(self):
 
         texto = self.texto_colagem.get("1.0", "end")
-        self.alunos = interpretar_colagem(texto)
+        existentes = getattr(self, "alunos", None) or []
+        if not existentes:
+            try:
+                rf = modulo_recorte()
+                cfg = rf.carregar_config()
+                if Path(cfg["fotos"]).is_dir():
+                    existentes = rf.alunos_das_fotos(cfg["fotos"])
+            except Exception:
+                existentes = []
+        self.alunos = interpretar_colagem(texto, alunos_existentes=existentes)
+
+        # Se o usuário colou apenas a coluna de planos e tínhamos alunos carregados, atualiza o texto com NOME | CURSO | PLANO
+        linhas_brutas = [l.strip() for l in texto.replace("\r\n", "\n").replace("\r", "\n").split("\n") if l.strip()]
+        if linhas_brutas and self.alunos and all("\t" not in l and eh_apenas_plano(l) for l in linhas_brutas) and any(a.get("nome") for a in self.alunos):
+            linhas_formatadas = ["NOME\tCURSO\tPLANO"] + [
+                f"{a['nome']}\t{a.get('curso') or ''}\t{a['plano']}" for a in self.alunos
+            ]
+            estado = str(self.texto_colagem.cget("state"))
+            self.texto_colagem.configure(state="normal")
+            self.texto_colagem.delete("1.0", "end")
+            self.texto_colagem.insert("1.0", "\n".join(linhas_formatadas) + "\n")
+            self.texto_colagem.configure(state=estado)
 
         self.tabela.delete(*self.tabela.get_children())
 

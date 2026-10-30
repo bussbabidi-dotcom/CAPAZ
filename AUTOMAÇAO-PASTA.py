@@ -239,9 +239,42 @@ MODELOS = {
         ]
     },
 
+    "MOSCOU 30X20": {
+
+        "tamanho": "30X20",
+
+        "psd":
+            "CAPA 30X20 (PRIME BOOK) - ZANGRAF.psd",
+
+        "foto": [
+            "FOTO"
+        ],
+
+        "nome_principal": [
+            "NOME"
+        ],
+
+        "background": [
+            "BACKGROUND"
+        ],
+
+        "frente": [
+            "BRAÇÕES",
+            "FRENTE"
+        ],
+
+        "lateral": [
+            "LATERAL"
+        ],
+
+        "nome_lateral": [
+            "NOME"
+        ]
+    },
+
 
     # ========================================================
-    # BERLIM 24X34
+    # BERLIM 24X34 / PACOTE BERLIM 24X34 / DIAMOND BOOK 24X34
     #
     # SOMENTE O PSD 24X34.
     #
@@ -249,6 +282,54 @@ MODELOS = {
     # ========================================================
 
     "STUDIO DAY BERLIM 24X34": {
+
+        "tamanho": "24X34",
+
+        "psd":
+            "CAPA 20X20 24x34 (BERLIM) - ZANGRAF.psd",
+
+        "foto34": [
+            "24X34",
+            "FOTO"
+        ],
+
+        "frente_24": [
+            "24X34",
+            "BRAÇÕES",
+            "FRENTE (PRINCIPAL) copiar 2"
+        ],
+
+        "nome_24": [
+            "24X34",
+            "NOME copiar"
+        ]
+    },
+
+    "PACOTE BERLIM 24X34": {
+
+        "tamanho": "24X34",
+
+        "psd":
+            "CAPA 20X20 24x34 (BERLIM) - ZANGRAF.psd",
+
+        "foto34": [
+            "24X34",
+            "FOTO"
+        ],
+
+        "frente_24": [
+            "24X34",
+            "BRAÇÕES",
+            "FRENTE (PRINCIPAL) copiar 2"
+        ],
+
+        "nome_24": [
+            "24X34",
+            "NOME copiar"
+        ]
+    },
+
+    "DIAMOND BOOK 24X34": {
 
         "tamanho": "24X34",
 
@@ -1348,13 +1429,20 @@ def encontrar_cabecalho(ws, padrao=True):
 
     planos = {
         chave("PLANO"),
+        chave("PLANOS"),
         chave("ALBUM"),
         chave("ÁLBUM"),
         chave("PRODUTO"),
         chave("TIPO"),
         chave("TIPO DE ALBUM"),
         chave("TIPO DE ÁLBUM"),
-        chave("TAMANHO")
+        chave("TAMANHO"),
+        chave("PACOTE"),
+        chave("MODELO"),
+        chave("FORMATO"),
+        chave("CAPA"),
+        chave("BOOK"),
+        chave("LIVRO"),
     }
 
     extras = {
@@ -1411,6 +1499,31 @@ def encontrar_cabecalho(ws, padrao=True):
     if not padrao:
         return None
 
+    # Detecção inteligente por conteúdo quando a planilha não tem linha de cabeçalho padrão
+    col_plano_detectada = None
+    col_curso_detectada = None
+    col_nome_detectada = None
+    for linha_teste in range(1, min(ws.max_row, 15) + 1):
+        for col_teste in range(1, min(ws.max_column, 12) + 1):
+            val_bruto = normalizar(ws.cell(linha_teste, col_teste).value)
+            if not val_bruto:
+                continue
+            if col_plano_detectada is None and eh_apenas_plano(val_bruto):
+                col_plano_detectada = col_teste
+            elif col_curso_detectada is None and chave(val_bruto) in CURSOS:
+                col_curso_detectada = col_teste
+            elif col_nome_detectada is None and not eh_apenas_plano(val_bruto) and not val_bruto.isdigit():
+                col_nome_detectada = col_teste
+        if col_plano_detectada and col_nome_detectada:
+            return (
+                0,
+                {
+                    "nome": col_nome_detectada,
+                    "curso": col_curso_detectada,
+                    "plano": col_plano_detectada,
+                },
+            )
+
     return (
         1,
         {
@@ -1428,6 +1541,16 @@ RE_TOKEN_TAMANHO = re.compile(
     r"(?:\s*\(\d+\))?"
     r"[\)\]\}\s_\-\.]*(?!\d)"
 )
+RE_TOKEN_PLANO = re.compile(
+    r"(?i)\b(?:"
+    r"studio\s+day\s+(?:moscou|moskow|moscovo|berlim|berlin)"
+    r"|pacote\s+(?:berlim|berlin|moscou|moskow)"
+    r"|prime\s+book"
+    r"|essencial\s+book|essential\s+book"
+    r"|diamond\s+book|diamante\s+book"
+    r"|(?:moscou|moskow|moscovo|berlim|berlin|diamond|diamante|essencial|essential|prime)\s*(?=(?:20\s*[x×*]\s*20|24\s*[x×*]\s*34|34\s*[x×*]\s*24|30\s*[x×*]\s*20|20\s*[x×*]\s*30|30\s*[x×*]\s*22)\b)"
+    r")\b"
+)
 
 PLANO_PADRAO_POR_TAMANHO = {
     "24X34": "STUDIO DAY BERLIM 24X34",
@@ -1435,6 +1558,23 @@ PLANO_PADRAO_POR_TAMANHO = {
     "30X22": "PRIME BOOK 30X22",
     "30X20": "PRIME BOOK 30X20",
 }
+
+MODELOS_BERLIM_24 = {
+    "STUDIO DAY BERLIM 24X34",
+    "PACOTE BERLIM 24X34",
+    "DIAMOND BOOK 24X34",
+}
+
+PLANOS_RECONHECIDOS = (
+    "Prime Book 30X20",
+    "Studio Day Moscou 30x20",
+    "Moscou 30X20",
+    "Essencial Book 20x20",
+    "Studio Day Berlim 24x34",
+    "Pacote Berlim 24x34",
+    "Diamond Book 24X34",
+    "Prime Book 30X22",
+)
 
 
 def extrair_tamanho_do_texto(texto):
@@ -1451,17 +1591,58 @@ def extrair_tamanho_do_texto(texto):
     return None
 
 
+def extrair_plano_do_texto(texto):
+    """Reconhece o plano completo a partir de qualquer variação textual."""
+    ch = chave(texto or "")
+    if not ch:
+        return None
+    compacto = re.sub(r"[\s_\-\.]+", "", ch).replace("×", "X").replace("*", "X")
+    if "30X22" in compacto:
+        return "PRIME BOOK 30X22"
+    if "STUDIO DAY" in ch and any(p in ch for p in ("MOSCOU", "MOSKOW", "MOSCOVO")):
+        return "STUDIO DAY MOSCOU 30X20"
+    if any(p in ch for p in ("MOSCOU", "MOSKOW", "MOSCOVO")):
+        return "MOSCOU 30X20"
+    if "PACOTE" in ch and any(p in ch for p in ("BERLIM", "BERLIN", "24X34", "34X24")):
+        return "PACOTE BERLIM 24X34"
+    if "STUDIO DAY" in ch and any(p in ch for p in ("BERLIM", "BERLIN", "24X34", "34X24")):
+        return "STUDIO DAY BERLIM 24X34"
+    if any(p in ch for p in ("DIAMOND", "DIAMANTE")):
+        return "DIAMOND BOOK 24X34"
+    if any(p in ch for p in ("BERLIM", "BERLIN")):
+        return "STUDIO DAY BERLIM 24X34"
+    if any(p in ch for p in ("ESSENCIAL", "ESSENTIAL")):
+        return "ESSENCIAL BOOK 20X20"
+    if "PRIME" in ch:
+        return "PRIME BOOK 30X20"
+    tam = extrair_tamanho_do_texto(texto)
+    if tam:
+        return PLANO_PADRAO_POR_TAMANHO.get(tam)
+    return None
+
+
 def limpar_tamanho_do_nome(nome):
-    """Remove qualquer sufixo/token de tamanho (ex.: 24X34, 34X24, 20X20, 30X20, 30X22) e extensão do nome do aluno."""
+    """Remove qualquer sufixo/token de plano ou tamanho (ex.: 24X34, Pacote Berlim 24x34, Studio Day Moscou 30x20) e extensão do nome do aluno."""
     texto = str(nome or "").strip()
     texto = RE_EXTENSAO_IMAGEM.sub("", texto)
+    texto = RE_TOKEN_PLANO.sub(" ", texto)
     texto = RE_TOKEN_TAMANHO.sub(" ", texto)
     texto = re.sub(r"[_\-]+", " ", texto)
-    return re.sub(r"\s+", " ", texto).strip()
+    texto = re.sub(r"\s+", " ", texto).strip()
+    if chave(texto) in {"MOSCOU", "MOSKOW", "MOSCOVO", "BERLIM", "BERLIN", "PRIME", "ESSENCIAL", "ESSENTIAL", "DIAMOND", "DIAMANTE", "STUDIO DAY", "PACOTE", "BOOK"}:
+        return ""
+    return texto
+
+
+def eh_apenas_plano(texto):
+    """Retorna True se o texto for exclusivamente um plano/tamanho (sem nome de aluno)."""
+    if not str(texto or "").strip():
+        return False
+    return bool(extrair_plano_do_texto(texto)) and not bool(limpar_tamanho_do_nome(texto))
 
 
 def formatar_nome(nome):
-    """Só a primeira letra de cada palavra maiúscula e sem o tamanho (24X34 / 20X20 / 30X20): "MARIA DA SILVA 24X34" -> "Maria Da Silva"."""
+    """Só a primeira letra de cada palavra maiúscula e sem o tamanho/plano: "MARIA DA SILVA 24X34" -> "Maria Da Silva"."""
     texto = limpar_tamanho_do_nome(nome)
     return re.sub(r"[^\W\d_]+", lambda m: m.group(0)[0].upper() + m.group(0)[1:].lower(), texto)
 
@@ -1523,7 +1704,7 @@ def ler_planilha(caminho=None):
                 colunas["nome"]
             ).value
         )
-        tam_no_nome = extrair_tamanho_do_texto(bruto_nome)
+        plano_no_nome = extrair_plano_do_texto(bruto_nome)
         nome = formatar_nome(bruto_nome)
 
         curso = ""
@@ -1542,9 +1723,15 @@ def ler_planilha(caminho=None):
                 linha,
                 colunas["plano"]
             ).value
-        )
-        if not plano and tam_no_nome:
-            plano = PLANO_PADRAO_POR_TAMANHO.get(tam_no_nome, "")
+        ) if colunas.get("plano") else ""
+
+        # Se o plano veio na coluna de curso (ex.: planilha de 2 colunas NOME | PLANO)
+        if not plano and curso and eh_apenas_plano(curso):
+            plano = curso
+            curso = ""
+
+        if not plano and plano_no_nome:
+            plano = plano_no_nome
 
         if not nome:
             continue
@@ -1579,9 +1766,19 @@ def ler_planilha(caminho=None):
 
 def encontrar_modelo(plano):
 
+    plano_reconhecido = extrair_plano_do_texto(plano)
+    if plano_reconhecido:
+        if plano_reconhecido == "ESSENCIAL BOOK 20X20":
+            return ("ESSENCIAL BOOK 20X20", MODELO_ESSENCIAL_20)
+        if plano_reconhecido in MODELOS:
+            return (plano_reconhecido, MODELOS[plano_reconhecido])
+
     plano_chave = chave(
         plano
     )
+
+    if not plano_chave:
+        return (None, None)
 
     if "30X22" in plano_chave.replace(" ", ""):
         return (
@@ -1594,13 +1791,6 @@ def encontrar_modelo(plano):
         return (
             "ESSENCIAL BOOK 20X20",
             MODELO_ESSENCIAL_20
-        )
-
-    if "DIAMOND" in plano_chave and "24" in plano_chave:
-        # Diamond 24x34 ainda nao tem PSD proprio — mapeia para Berlim
-        return (
-            "STUDIO DAY BERLIM 24X34",
-            MODELOS["STUDIO DAY BERLIM 24X34"]
         )
 
     for nome, modelo in MODELOS.items():
@@ -1623,13 +1813,13 @@ def encontrar_modelo(plano):
                 modelo
             )
 
-    # Atalhos parciais: "Moscou 30X20", "Berlim", "Prime Book"
+    # Atalhos parciais: "Moscou 30X20", "Pacote Berlim 24x34", "Diamond Book 24X34", "Prime Book"
     atalhos = [
-        (("MOSCOU", "MOSKOW", "MOSCOVO"), "STUDIO DAY MOSCOU 30X20"),
+        (("MOSCOU", "MOSKOW", "MOSCOVO"), "MOSCOU 30X20"),
         (("BERLIM", "BERLIN", "BERLINENSE"), "STUDIO DAY BERLIM 24X34"),
         (("PRIME",), "PRIME BOOK 30X20"),
         (("ESSENCIAL", "ESSENTIAL"), "ESSENCIAL BOOK 20X20"),
-        (("DIAMOND", "DIAMANTE"), "STUDIO DAY BERLIM 24X34"),
+        (("DIAMOND", "DIAMANTE"), "DIAMOND BOOK 24X34"),
     ]
 
     for palavras, modelo_nome in atalhos:
@@ -2278,16 +2468,14 @@ def layout_nome(nome, tamanho):
 
 
 def criar_job_berlim_24(
-    registro
+    registro,
+    modelo_nome="STUDIO DAY BERLIM 24X34"
 ):
 
-    modelo_nome = (
-        "STUDIO DAY BERLIM 24X34"
+    modelo = MODELOS.get(
+        modelo_nome,
+        MODELOS["STUDIO DAY BERLIM 24X34"]
     )
-
-    modelo = MODELOS[
-        modelo_nome
-    ]
 
     nome = formatar_nome(registro["nome"])
 
@@ -6455,6 +6643,9 @@ function executar() {
             ||
             job.modelo ===
             "STUDIO DAY MOSCOU 30X20"
+            ||
+            job.modelo ===
+            "MOSCOU 30X20"
         ) {
 
             processarPrimeBook(
@@ -6467,6 +6658,12 @@ function executar() {
         else if (
             job.modelo ===
             "STUDIO DAY BERLIM 24X34"
+            ||
+            job.modelo ===
+            "PACOTE BERLIM 24X34"
+            ||
+            job.modelo ===
+            "DIAMOND BOOK 24X34"
         ) {
 
             processarBerlim24(
@@ -7436,9 +7633,9 @@ def montar_jobs_validacao(registro, modelo_nome, modelo):
     if chave(modelo_nome) == chave("ESSENCIAL BOOK 20X20"):
         jobs.append(criar_job_essencial_20(registro))
 
-    elif chave(modelo_nome) == chave("STUDIO DAY BERLIM 24X34"):
+    elif chave(modelo_nome) in {chave(m) for m in MODELOS_BERLIM_24}:
         if BERLIM_GERAR_24:
-            jobs.append(criar_job_berlim_24(registro))
+            jobs.append(criar_job_berlim_24(registro, modelo_nome))
         if BERLIM_GERAR_20:
             jobs.append(criar_job_essencial_20(registro))
         if not jobs:
@@ -7730,17 +7927,17 @@ def processar_registro(registro):
         else:
             pulados += 1
 
-    elif chave(modelo_nome) == chave("STUDIO DAY BERLIM 24X34"):
+    elif chave(modelo_nome) in {chave(m) for m in MODELOS_BERLIM_24}:
 
         print()
-        print("MODELO BERLIM DETECTADO.")
+        print("MODELO BERLIM/24X34 DETECTADO (" + str(modelo_nome) + ").")
         print(
             "  berlim_gerar_24:", BERLIM_GERAR_24,
             "| berlim_gerar_20:", BERLIM_GERAR_20,
         )
 
         if BERLIM_GERAR_24:
-            job24 = criar_job_berlim_24(registro)
+            job24 = criar_job_berlim_24(registro, modelo_nome)
 
             print()
             print(">>> PROCESSANDO 24X34")

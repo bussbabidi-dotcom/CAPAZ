@@ -336,6 +336,27 @@ RE_TOKEN_TAMANHO = re.compile(
     r"(?:\s*\(\d+\))?"
     r"[\)\]\}\s_\-\.]*(?!\d)"
 )
+RE_TOKEN_PLANO = re.compile(
+    r"(?i)\b(?:"
+    r"studio\s+day\s+(?:moscou|moskow|moscovo|berlim|berlin)"
+    r"|pacote\s+(?:berlim|berlin|moscou|moskow)"
+    r"|prime\s+book"
+    r"|essencial\s+book|essential\s+book"
+    r"|diamond\s+book|diamante\s+book"
+    r"|(?:moscou|moskow|moscovo|berlim|berlin|diamond|diamante|essencial|essential|prime)\s*(?=(?:20\s*[x×*]\s*20|24\s*[x×*]\s*34|34\s*[x×*]\s*24|30\s*[x×*]\s*20|20\s*[x×*]\s*30|30\s*[x×*]\s*22)\b)"
+    r")\b"
+)
+
+PLANOS_RECONHECIDOS = (
+    "Prime Book 30X20",
+    "Studio Day Moscou 30x20",
+    "Moscou 30X20",
+    "Essencial Book 20x20",
+    "Studio Day Berlim 24x34",
+    "Pacote Berlim 24x34",
+    "Diamond Book 24X34",
+    "Prime Book 30X22",
+)
 
 
 def extrair_tamanho_do_texto(texto):
@@ -352,13 +373,66 @@ def extrair_tamanho_do_texto(texto):
     return None
 
 
+PLANO_POR_TAMANHO = {
+    "30X20": "Prime Book 30X20",
+    "20X20": "Essencial Book 20x20",
+    "24X34": "Studio Day Berlim 24x34",
+    "30X22": "Prime Book 30X22",
+}
+
+
+def extrair_plano_do_texto(texto):
+    """
+    Reconhece o plano completo a partir do texto (ex.: 'Prime Book 30X20', 'Studio Day Moscou 30x20',
+    'Moscou 30X20', 'Essencial Book 20x20', 'Studio Day Berlim 24x34', 'Pacote Berlim 24x34',
+    'Diamond Book 24X34', 'Prime Book 30X22') ou pelo sufixo de tamanho.
+    """
+    ch = chave(texto or "")
+    if not ch:
+        return None
+    compacto = re.sub(r"[\s_\-\.]+", "", ch).replace("×", "x").replace("*", "x")
+    if "30x22" in compacto:
+        return "Prime Book 30X22"
+    if "studio day" in ch and any(p in ch for p in ("moscou", "moskow", "moscovo")):
+        return "Studio Day Moscou 30x20"
+    if any(p in ch for p in ("moscou", "moskow", "moscovo")):
+        return "Moscou 30X20"
+    if "pacote" in ch and any(p in ch for p in ("berlim", "berlin", "24x34", "34x24")):
+        return "Pacote Berlim 24x34"
+    if "studio day" in ch and any(p in ch for p in ("berlim", "berlin", "24x34", "34x24")):
+        return "Studio Day Berlim 24x34"
+    if any(p in ch for p in ("diamond", "diamante")):
+        return "Diamond Book 24X34"
+    if any(p in ch for p in ("berlim", "berlin")):
+        return "Studio Day Berlim 24x34"
+    if any(p in ch for p in ("essencial", "essential")):
+        return "Essencial Book 20x20"
+    if "prime" in ch:
+        return "Prime Book 30X20"
+    tam = extrair_tamanho_do_texto(texto)
+    if tam:
+        return PLANO_POR_TAMANHO.get(tam)
+    return None
+
+
 def limpar_tamanho_do_nome(nome):
-    """Remove qualquer sufixo/token de tamanho (ex.: 24X34, 34X24, 20X20, 30X20, 30X22) e extensão do nome do aluno."""
+    """Remove qualquer sufixo/token de plano ou tamanho (ex.: 24X34, Pacote Berlim 24x34, Studio Day Moscou 30x20) e extensão do nome do aluno."""
     texto = str(nome or "").strip()
     texto = RE_EXTENSAO_IMAGEM.sub("", texto)
+    texto = RE_TOKEN_PLANO.sub(" ", texto)
     texto = RE_TOKEN_TAMANHO.sub(" ", texto)
     texto = re.sub(r"[_\-]+", " ", texto)
-    return re.sub(r"\s+", " ", texto).strip()
+    texto = re.sub(r"\s+", " ", texto).strip()
+    if chave(texto) in {"moscou", "moskow", "moscovo", "berlim", "berlin", "prime", "essencial", "essential", "diamond", "diamante", "studio day", "pacote", "book"}:
+        return ""
+    return texto
+
+
+def eh_apenas_plano(texto):
+    """Retorna True se o texto for exclusivamente o nome de um plano/tamanho (sem nome de aluno)."""
+    if not str(texto or "").strip():
+        return False
+    return bool(extrair_plano_do_texto(texto)) and not bool(limpar_tamanho_do_nome(texto))
 
 
 def tamanho_do_arquivo(caminho):
@@ -370,16 +444,8 @@ def tamanho_do_arquivo(caminho):
     return "30X20"
 
 
-PLANO_POR_TAMANHO = {
-    "30X20": "Prime Book 30X20",
-    "20X20": "Essencial Book 20x20",
-    "24X34": "Studio Day Berlim 24x34",
-    "30X22": "Prime Book 30X22",
-}
-
-
 def formatar_nome(nome):
-    """Só a primeira letra de cada palavra maiúscula e sem o tamanho (24X34 / 20X20 / 30X20): "MARIA DA SILVA 24X34" -> "Maria Da Silva"."""
+    """Só a primeira letra de cada palavra maiúscula e sem o tamanho/plano: "MARIA DA SILVA 24X34" -> "Maria Da Silva"."""
     texto = limpar_tamanho_do_nome(nome)
     return re.sub(r"[^\W\d_]+", lambda m: m.group(0)[0].upper() + m.group(0)[1:].lower(), texto)
 
@@ -863,16 +929,22 @@ def nome_arquivo_destino_foto(nome_aluno, tam):
 
 
 def tamanhos_do_plano(plano, berlim_modo="Ambos"):
-    """Devolve a lista de tamanhos de foto exigidos pelo plano (ex.: ['30X20'], ['20X20'], ['24X34', '20X20'])."""
+    """
+    Devolve a lista de tamanhos de foto exigidos pelo plano:
+      - Studio Day Berlim 24x34 / Pacote Berlim 24x34 / Diamond Book 24X34 -> ['24X34', '20X20'] (conforme berlim_modo)
+      - Essencial Book 20x20 -> ['20X20']
+      - Prime Book 30X20 / Studio Day Moscou 30x20 / Moscou 30X20 / Prime Book 30X22 -> ['30X20']
+    """
     p = chave(plano or "")
-    if any(k in p for k in ("berlim", "berlin", "24x34", "34x24", "diamond", "diamante")):
+    compacto = re.sub(r"[\s_\-\.]+", "", p).replace("×", "x").replace("*", "x")
+    if any(k in p for k in ("berlim", "berlin", "diamond", "diamante", "pacote berlim")) or "24x34" in compacto or "34x24" in compacto:
         modo = chave(berlim_modo or "ambos")
         if "24x34" in modo:
             return ["24X34"]
         if "20x20" in modo:
             return ["20X20"]
         return ["24X34", "20X20"]
-    if "20x20" in p or "essencial" in p:
+    if "20x20" in compacto or "essencial" in p or "essential" in p:
         return ["20X20"]
     return ["30X20"]
 
@@ -2417,10 +2489,9 @@ def escolher_melhores_fotos_subpastas(
     tarefas = []
     for idx_sub, sub in enumerate(subpastas, 1):
         bruto_pasta = sub.name if sub != pasta_mae else pasta_mae.name
-        tam_na_pasta = extrair_tamanho_do_texto(bruto_pasta)
+        plano_inferido_pasta = extrair_plano_do_texto(bruto_pasta)
         nome_aluno = formatar_nome(bruto_pasta)
         ch_aluno = chave(nome_aluno)
-        plano_inferido_pasta = PLANO_POR_TAMANHO.get(tam_na_pasta) if tam_na_pasta else None
         plano_aluno = mapa_planos.get(ch_aluno) or plano_inferido_pasta or plano_padrao
         curso_aluno = mapa_cursos.get(ch_aluno) or cursos_salvos_nome.get(ch_aluno) or curso_padrao
         tamanhos_necessarios = tamanhos_do_plano(plano_aluno, berlim_modo)
