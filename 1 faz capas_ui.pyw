@@ -1271,6 +1271,14 @@ class JanelaCapas:
                         usar_gpu_opencl=usar_gpu,
                     )
                 alunos = rf.alunos_das_fotos(cfg["fotos"])
+                if hasattr(rf, "garantir_opcoes_foto_disponiveis"):
+                    try:
+                        calib_ler = rf.carregar_calibracao(cfg)
+                        rf.garantir_opcoes_foto_disponiveis(cfg, calib=calib_ler, alunos_atuais=alunos)
+                        if not alunos:
+                            alunos = rf.alunos_das_fotos(cfg["fotos"])
+                    except Exception:
+                        pass
             except Exception as e:
                 erro = str(e)
                 alunos = None
@@ -1502,18 +1510,22 @@ class JanelaCapas:
         Abre a Tela Visual Rápida para o usuário escolher com 1 clique (ou teclas 1 a 7)
         1 foto entre as 7 melhores avaliadas pela escolha rápida de orientação.
         """
-        from tkinter import messagebox
-
         rf = modulo_recorte()
-        opcoes_todas = rf.ler_opcoes_foto() if hasattr(rf, "ler_opcoes_foto") else {}
-        if not opcoes_todas:
-            messagebox.showinfo(
-                "Escolher 1 entre as 7 Melhores",
-                "Ainda não há fotos avaliadas das subpastas.\n\n"
-                "Clique primeiro em \"Escolher Melhores Fotos (Subpastas)\" para fazer a separação rápida "
-                "das 7 melhores fotos de cada formando.",
-            )
-            return
+        tk = self.tk
+        ttk = self.ttk
+        cfg = rf.carregar_config()
+        calib = rf.carregar_calibracao(cfg)
+
+        # Garante que as opções sejam descobertas automaticamente de subpastas ou da pasta FOTO
+        if hasattr(rf, "garantir_opcoes_foto_disponiveis"):
+            try:
+                opcoes_todas = rf.garantir_opcoes_foto_disponiveis(
+                    cfg, calib=calib, alunos_atuais=self.alunos
+                )
+            except Exception:
+                opcoes_todas = rf.ler_opcoes_foto() if hasattr(rf, "ler_opcoes_foto") else {}
+        else:
+            opcoes_todas = rf.ler_opcoes_foto() if hasattr(rf, "ler_opcoes_foto") else {}
 
         # Fecha instância anterior se já estiver aberta para focar na nova
         if getattr(self, "_janela_7_melhores", None) is not None:
@@ -1523,11 +1535,6 @@ class JanelaCapas:
             except Exception:
                 pass
 
-        tk = self.tk
-        ttk = self.ttk
-        cfg = rf.carregar_config()
-        calib = rf.carregar_calibracao(cfg)
-
         jan = tk.Toplevel(self.root)
         self._janela_7_melhores = jan
         jan.title("Escolher 1 entre as 7 Melhores Fotos — Seleção Rápida por Orientação")
@@ -1536,27 +1543,29 @@ class JanelaCapas:
         jan.configure(background=COR_FUNDO)
         jan.transient(self.root)
 
-        # Organiza os registros ordenados por nome do formando e tamanho
-        registros = []
-        for chave_op, dados_op in opcoes_todas.items():
-            if not isinstance(dados_op, dict):
-                continue
-            cands = (dados_op.get("candidatas") or [])[:7]
-            if not cands:
-                continue
-            registros.append({
-                "chave_op": chave_op,
-                "nome": dados_op.get("nome") or chave_op.split("|")[0],
-                "tamanho": dados_op.get("tamanho") or "30X20",
-                "escolhida": str(dados_op.get("escolhida") or cands[0].get("caminho") or ""),
-                "aviso_revisao": str(dados_op.get("aviso_revisao") or ""),
-                "candidatas": cands,
-            })
-        registros.sort(key=lambda r: (rf.chave(r["nome"]), r["tamanho"]))
+        def _montar_registros(mapa_opcoes):
+            regs = []
+            for chave_op, dados_op in (mapa_opcoes or {}).items():
+                if not isinstance(dados_op, dict):
+                    continue
+                cands = [
+                    c for c in (dados_op.get("candidatas") or [])
+                    if isinstance(c, dict) and c.get("caminho")
+                ][:7]
+                if not cands:
+                    continue
+                regs.append({
+                    "chave_op": chave_op,
+                    "nome": dados_op.get("nome") or chave_op.split("|")[0],
+                    "tamanho": dados_op.get("tamanho") or "30X20",
+                    "escolhida": str(dados_op.get("escolhida") or cands[0].get("caminho") or ""),
+                    "aviso_revisao": str(dados_op.get("aviso_revisao") or ""),
+                    "candidatas": cands,
+                })
+            regs.sort(key=lambda r: (rf.chave(r["nome"]), r["tamanho"]))
+            return regs
 
-        if not registros:
-            jan.destroy()
-            return
+        registros = _montar_registros(opcoes_todas)
 
         jan.columnconfigure(1, weight=1)
         jan.rowconfigure(0, weight=1)
@@ -1567,9 +1576,10 @@ class JanelaCapas:
         painel_esq.rowconfigure(2, weight=1)
         painel_esq.columnconfigure(0, weight=1)
 
+        titulo_esq_var = tk.StringVar(value=f"Formandos ({len(registros)})")
         ttk.Label(
             painel_esq,
-            text=f"Formandos ({len(registros)})",
+            textvariable=titulo_esq_var,
             style="Titulo.TLabel",
         ).grid(row=0, column=0, sticky="w")
 
@@ -1671,11 +1681,18 @@ class JanelaCapas:
             anchor="w",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
+        botoes_cab = ttk.Frame(cabecalho)
+        botoes_cab.grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 0))
         ttk.Button(
-            cabecalho,
+            botoes_cab,
+            text="Escolher Outra Pasta de Subpastas...",
+            command=lambda: _selecionar_pasta_subpastas_daqui(),
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            botoes_cab,
             text="Abrir na Revisão e Recorte Completa",
             command=lambda: _abrir_aluno_na_revisao(),
-        ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 0))
+        ).pack(side="left")
 
         grade_cartoes = ttk.Frame(painel_dir)
         grade_cartoes.grid(row=1, column=0, sticky="nsew")
@@ -1696,12 +1713,55 @@ class JanelaCapas:
         ).pack(side="left", fill="x", expand=True)
         ttk.Button(rodape, text="Concluir e Fechar (Esc)", style="Primario.TButton", command=jan.destroy).pack(side="right")
 
+        placeholder_pil = Image.new("RGB", (210, 155), (35, 39, 47))
+        placeholder_tk = ImageTk.PhotoImage(placeholder_pil)
+
         estado_tela = {
             "reg_por_iid": {},
             "iid_atual": None,
-            "imagens_tk": [],
+            "imagens_tk": [placeholder_tk],
             "token_render": 0,
+            "populando": False,
         }
+
+        def _selecionar_pasta_subpastas_daqui():
+            from tkinter import filedialog
+            bruto = rf.ler_config_bruto()
+            pasta_ini = bruto.get("subpastas_fotos_dir") or bruto.get("photos_dir") or str(PASTA)
+            nova_pasta = filedialog.askdirectory(
+                parent=jan,
+                title="Escolha a pasta principal com as subpastas dos formandos",
+                initialdir=pasta_ini if Path(pasta_ini).is_dir() else str(PASTA),
+            )
+            if not nova_pasta:
+                return
+            status_escolha_var.set("Analisando as subpastas escolhidas... aguarde um instante.")
+            jan.update_idletasks()
+            try:
+                rf.gravar_config({"subpastas_fotos_dir": nova_pasta})
+                cfg_novo = rf.carregar_config()
+                rf.escolher_melhores_fotos_subpastas(
+                    nova_pasta,
+                    cfg_novo,
+                    calib=calib,
+                    alunos_planos=list(self.carregar()),
+                    plano_padrao=self.plano_todos.get().strip() or "Prime Book 30X20",
+                    curso_padrao=self.curso_todos.get().strip(),
+                    berlim_modo=self.berlim.get().strip() or "Ambos",
+                )
+                novas_op = rf.ler_opcoes_foto()
+                registros.clear()
+                registros.extend(_montar_registros(novas_op))
+                titulo_esq_var.set(f"Formandos ({len(registros)})")
+                estado_tela["iid_atual"] = None
+                _popular_arvore()
+                self.ler_fotos()
+                if hasattr(self, "aba_fotos"):
+                    self.aba_fotos.atualizar_lista(silencioso=True)
+                    self.aba_fotos.agendar_revisao(200)
+                status_escolha_var.set(f"✓ {len(registros)} formando(s) carregado(s) da pasta {Path(nova_pasta).name}!")
+            except Exception as e:
+                status_escolha_var.set("Erro ao ler subpastas: " + str(e))
 
         def _texto_escolhida_curto(reg):
             cands = reg["candidatas"]
@@ -1712,37 +1772,44 @@ class JanelaCapas:
             return "#1"
 
         def _popular_arvore():
-            termo = rf.chave(filtro_var.get()) if filtro_var.get().strip() else ""
-            arvore.delete(*arvore.get_children())
-            estado_tela["reg_por_iid"].clear()
-            primeiro_iid = None
-            alvo_iid = None
-            alvo_nome_ch = rf.chave(nome_aluno_inicial) if nome_aluno_inicial else ""
+            estado_tela["populando"] = True
+            try:
+                termo = rf.chave(filtro_var.get()) if filtro_var.get().strip() else ""
+                arvore.delete(*arvore.get_children())
+                estado_tela["reg_por_iid"].clear()
+                primeiro_iid = None
+                alvo_iid = None
+                alvo_nome_ch = rf.chave(nome_aluno_inicial) if nome_aluno_inicial else ""
 
-            for idx_r, reg in enumerate(registros):
-                if termo and termo not in rf.chave(reg["nome"]):
-                    continue
-                iid = f"reg_{idx_r}"
-                estado_tela["reg_por_iid"][iid] = reg
-                txt_esc = _texto_escolhida_curto(reg)
-                tag = "trocada" if not txt_esc.startswith("#1 ") else ("aviso" if reg.get("aviso_revisao") else "")
-                arvore.insert(
-                    "",
-                    "end",
-                    iid=iid,
-                    values=(reg["nome"], reg["tamanho"], txt_esc),
-                    tags=(tag,) if tag else (),
-                )
-                if primeiro_iid is None:
-                    primeiro_iid = iid
-                if alvo_nome_ch and rf.chave(reg["nome"]) == alvo_nome_ch and alvo_iid is None:
-                    alvo_iid = iid
+                for idx_r, reg in enumerate(registros):
+                    if termo and termo not in rf.chave(reg["nome"]):
+                        continue
+                    iid = f"reg_{idx_r}"
+                    estado_tela["reg_por_iid"][iid] = reg
+                    txt_esc = _texto_escolhida_curto(reg)
+                    tag = "trocada" if not txt_esc.startswith("#1 ") else ("aviso" if reg.get("aviso_revisao") else "")
+                    arvore.insert(
+                        "",
+                        "end",
+                        iid=iid,
+                        values=(reg["nome"], reg["tamanho"], txt_esc),
+                        tags=(tag,) if tag else (),
+                    )
+                    if primeiro_iid is None:
+                        primeiro_iid = iid
+                    if alvo_nome_ch and rf.chave(reg["nome"]) == alvo_nome_ch and alvo_iid is None:
+                        alvo_iid = iid
 
-            selecionar = alvo_iid or estado_tela["iid_atual"] or primeiro_iid
-            if selecionar and arvore.exists(selecionar):
-                arvore.selection_set(selecionar)
-                arvore.see(selecionar)
-                _ao_selecionar_arvore()
+                selecionar = alvo_iid or (
+                    estado_tela["iid_atual"] if estado_tela["iid_atual"] in estado_tela["reg_por_iid"] else None
+                ) or primeiro_iid
+                if selecionar and arvore.exists(selecionar):
+                    estado_tela["iid_atual"] = selecionar
+                    arvore.selection_set(selecionar)
+                    arvore.see(selecionar)
+            finally:
+                estado_tela["populando"] = False
+            _renderizar_formando_atual()
 
         def _ir_para_vizinho(delta):
             itens = arvore.get_children()
@@ -1752,9 +1819,14 @@ class JanelaCapas:
             idx_at = itens.index(sel[0]) if sel and sel[0] in itens else 0
             novo_idx = max(0, min(len(itens) - 1, idx_at + delta))
             novo_iid = itens[novo_idx]
-            arvore.selection_set(novo_iid)
-            arvore.see(novo_iid)
-            _ao_selecionar_arvore()
+            estado_tela["populando"] = True
+            try:
+                estado_tela["iid_atual"] = novo_iid
+                arvore.selection_set(novo_iid)
+                arvore.see(novo_iid)
+            finally:
+                estado_tela["populando"] = False
+            _renderizar_formando_atual()
 
         ttk.Button(nav_botoes, text="< Anterior", command=lambda: _ir_para_vizinho(-1)).grid(
             row=0, column=0, sticky="we", padx=(0, 4)
@@ -1808,6 +1880,8 @@ class JanelaCapas:
             # Sincroniza com a aba Revisão e Recorte em segundo plano
             if hasattr(self, "aba_fotos"):
                 try:
+                    self.aba_fotos._conhecer_arquivo("fotos", cfg["fotos"])
+                    self.aba_fotos._cache_recorte_revisao.clear()
                     if self.aba_fotos.arquivo and self.aba_fotos.arquivo.resolve() == Path(destino).resolve():
                         self.aba_fotos.abrir(destino)
                     self.aba_fotos.agendar_revisao(200)
@@ -1824,11 +1898,44 @@ class JanelaCapas:
         def _renderizar_formando_atual():
             for w in grade_cartoes.winfo_children():
                 w.destroy()
-            estado_tela["imagens_tk"].clear()
+            estado_tela["imagens_tk"] = [placeholder_tk]
 
             iid = estado_tela["iid_atual"]
             reg = estado_tela["reg_por_iid"].get(iid) if iid else None
             if not reg:
+                titulo_aluno_var.set("Nenhuma subpasta de formando carregada ainda")
+                subtitulo_aluno_var.set(
+                    "Clique no botão abaixo para selecionar a pasta que contém as subpastas de fotos dos formandos."
+                )
+                aviso_vazio = tk.Frame(
+                    grade_cartoes,
+                    background=COR_SUPERFICIE,
+                    padx=28,
+                    pady=28,
+                    highlightthickness=1,
+                    highlightbackground=COR_BORDA,
+                )
+                aviso_vazio.grid(row=0, column=0, columnspan=4, rowspan=2, sticky="nsew", padx=20, pady=20)
+                tk.Label(
+                    aviso_vazio,
+                    text="Nenhuma foto candidata encontrada para exibir nesta janela.",
+                    font=("Segoe UI", 12, "bold"),
+                    background=COR_SUPERFICIE,
+                    foreground=COR_TEXTO,
+                ).pack(pady=(20, 8))
+                tk.Label(
+                    aviso_vazio,
+                    text="Escolha a pasta onde estão as subpastas de cada formando para separar automaticamente as 7 melhores fotos:",
+                    font=("Segoe UI", 10),
+                    background=COR_SUPERFICIE,
+                    foreground=COR_SECUNDARIO,
+                ).pack(pady=(0, 16))
+                ttk.Button(
+                    aviso_vazio,
+                    text="Escolher Pasta com as Subpastas dos Formandos...",
+                    style="Primario.TButton",
+                    command=_selecionar_pasta_subpastas_daqui,
+                ).pack()
                 return
 
             cands = reg["candidatas"][:7]
@@ -1836,9 +1943,9 @@ class JanelaCapas:
             tam = reg["tamanho"]
             modo_vis = modo_miniatura_var.get()
 
-            titulo_aluno_var.set(f"{reg['nome']}   —   Capa {tam}   ({len(cands)} melhores opções da pasta)")
+            titulo_aluno_var.set(f"{reg['nome']}   —   Capa {tam}   ({len(cands)} opção(ões) disponível(is))")
             subtitulo_aluno_var.set(
-                "Separadas por Orientação Ideal + Pessoa Sozinha + Encaixe no Molde  |  "
+                "Separadas por Orientação Ideal + 1 Rosto + Encaixe no Molde  |  "
                 "Clique no cartão da foto desejada ou pressione as teclas 1 a 7"
             )
 
@@ -1897,10 +2004,13 @@ class JanelaCapas:
                     foreground=cor_orient,
                 ).pack(side="right")
 
-                # Área da Miniatura (clicável para escolher em 1 clique)
+                # Área da Miniatura (clicável para escolher em 1 clique, com placeholder fixo 210x155)
                 lbl_img = tk.Label(
                     card,
-                    text="Carregando prévia...",
+                    image=placeholder_tk,
+                    text="Carregando foto...",
+                    compound="center",
+                    font=("Segoe UI", 8),
                     background=COR_CAMPO,
                     foreground=COR_SECUNDARIO,
                     cursor="hand2",
@@ -1909,10 +2019,13 @@ class JanelaCapas:
                 lbl_img.bind("<Button-1>", lambda e, i=idx_c: _escolher_candidata_indice(i))
                 labels_imagem.append((idx_c, cand, lbl_img))
 
-                # Nome do arquivo + Nota e Encaixe
+                # Nome do arquivo + Nota e Indicadores C/N/B
+                c_pct = int(round(float(cand.get("contraste_score", 75))))
+                n_pct = int(round(float(cand.get("nitidez_score") or min(100.0, float(cand.get("nitidez", 120)) / 1.8))))
+                b_pct = int(round(float(cand.get("brilho_score", 85))))
                 info_txt = (
                     f"{cand.get('nome_arquivo', '')}  ·  {cand.get('nota', 0):.1f} pts  ·  "
-                    f"Encaixe {cand.get('encaixe_pct', 0)}%"
+                    f"C:{c_pct}% N:{n_pct}% B:{b_pct}%"
                 )
                 tk.Label(
                     card,
@@ -1948,7 +2061,7 @@ class JanelaCapas:
                 )
                 btn_card.grid(row=4, column=0, sticky="we")
 
-            # Carrega as 7 miniaturas em thread de fundo usando os proxies locais (~2ms por foto)
+            # Carrega as 7 miniaturas em thread de fundo usando os proxies locais
             def _carregar_miniaturas_bg():
                 for idx_c, cand, lbl_w in labels_imagem:
                     if estado_tela["token_render"] != meu_token:
@@ -1962,24 +2075,32 @@ class JanelaCapas:
                             caixa_sugerida=cand.get("caixa"),
                             lado_max=205,
                             modo=modo_vis,
+                            tamanho_canvas=(210, 155),
                         )
                     except Exception:
                         im_pil = None
 
-                    if im_pil is not None and estado_tela["token_render"] == meu_token:
+                    if estado_tela["token_render"] == meu_token:
                         def _aplicar_img(widget=lbl_w, pil_im=im_pil):
                             if estado_tela["token_render"] != meu_token or not widget.winfo_exists():
                                 return
-                            tk_im = ImageTk.PhotoImage(pil_im)
-                            estado_tela["imagens_tk"].append(tk_im)
-                            widget.configure(image=tk_im, text="")
+                            if pil_im is not None:
+                                tk_im = ImageTk.PhotoImage(pil_im)
+                                estado_tela["imagens_tk"].append(tk_im)
+                                widget.configure(image=tk_im, text="")
+                            else:
+                                widget.configure(text="Foto não encontrada")
                         jan.after(0, _aplicar_img)
 
             threading.Thread(target=_carregar_miniaturas_bg, daemon=True).start()
 
         def _ao_selecionar_arvore(evento=None):
+            if estado_tela.get("populando"):
+                return
             sel = arvore.selection()
             if not sel:
+                return
+            if estado_tela["iid_atual"] == sel[0] and grade_cartoes.winfo_children():
                 return
             estado_tela["iid_atual"] = sel[0]
             _renderizar_formando_atual()
@@ -2877,18 +2998,23 @@ class AbaFotos:
         self.quadro_previa_revisao = imagens
         imagens.bind("<Configure>", self._ao_configurar_previa_revisao)
 
-        # Galeria Fixa em Grid das 7 Fotos Sugeridas (Abaixo da Prévia Grande — Troca em 1 Clique)
+        # Galeria Fixa em Grid das 7 Fotos Sugeridas (Abaixo da Prévia Grande — Com Miniaturas + Troca em 1 Clique)
         self.quadro_grid_7_fotos = ttk.LabelFrame(
             painel,
-            text="Galeria das 7 Fotos Sugeridas (Troca em 1 Clique · Indicadores Contraste / Nitidez / Brilho)",
+            text="Galeria Visual das 7 Fotos Sugeridas (Troca em 1 Clique · Miniatura + Contraste / Nitidez / Brilho)",
             padding=4,
         )
         self.quadro_grid_7_fotos.grid(row=3, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        self._placeholder_grid_7_tk = ImageTk.PhotoImage(Image.new("RGB", (96, 72), (35, 39, 47)))
+        self._imagens_grid_7_tk = [None] * 7
+        self._token_thumbs_grid_7 = 0
         self._botoes_grid_7 = []
         for idx_g in range(7):
             self.quadro_grid_7_fotos.columnconfigure(idx_g, weight=1)
             btn_card = tk.Button(
                 self.quadro_grid_7_fotos,
+                image=self._placeholder_grid_7_tk,
+                compound="top",
                 text=f"#{idx_g + 1}\n--\nC:-- N:-- B:--",
                 font=("Consolas", 8),
                 background=COR_CAMPO,
@@ -2897,7 +3023,7 @@ class AbaFotos:
                 activeforeground="#0F172A",
                 relief="solid",
                 bd=1,
-                padx=4,
+                padx=3,
                 pady=3,
                 cursor="hand2",
                 state="disabled",
@@ -3101,7 +3227,11 @@ class AbaFotos:
         """Registra uma gravação feita pela própria UI para o vigia não tratá-la como mudança externa."""
 
         if self._assinaturas:
-            self._assinaturas[nome] = self._assinatura_arquivo(caminho)
+            p = Path(caminho)
+            if nome == "fotos" or p.is_dir():
+                self._assinaturas[nome] = self._assinatura_pasta(p)
+            else:
+                self._assinaturas[nome] = self._assinatura_arquivo(p)
 
     def _vigiar_mudancas(self):
 
@@ -3182,8 +3312,12 @@ class AbaFotos:
 
     def abrir_revisao(self):
 
-        if self._revisao_suja and not self._revisao_por_curso:
+        if not self._revisao_por_curso:
             self._recarregar_revisao()
+        elif self._revisao_suja and not (self.trava_aluno_revisao.get() and self._aluno_escolhido):
+            self._recarregar_revisao()
+        elif self._aluno_nome and self.arquivo:
+            self._atualizar_opcoes_foto_aluno()
 
     def _recarregar_revisao(self):
 
@@ -3219,6 +3353,11 @@ class AbaFotos:
             try:
                 if hasattr(rf, "verificar_cache_analise_subpastas"):
                     rf.verificar_cache_analise_subpastas(cfg["fotos"])
+                if hasattr(rf, "garantir_opcoes_foto_disponiveis"):
+                    try:
+                        rf.garantir_opcoes_foto_disponiveis(cfg, calib=calibracao, alunos_atuais=registros_colados)
+                    except Exception:
+                        pass
                 if origem == "arquivo":
                     if not caminho_planilha:
                         raise ValueError("Escolha uma planilha antes de carregar a revisão.")
@@ -3228,7 +3367,12 @@ class AbaFotos:
                         caminho = Path(caminho_planilha)
                     registros = automacao.ler_planilha(caminho)
                 else:
-                    registros = registros_colados
+                    registros = list(registros_colados)
+                    if not registros and Path(cfg["fotos"]).is_dir():
+                        try:
+                            registros = rf.alunos_das_fotos(cfg["fotos"])
+                        except Exception:
+                            registros = []
 
                 entradas = []
                 caminhos_vistos = set()
@@ -3385,6 +3529,16 @@ class AbaFotos:
                             if previa:
                                 capa = rf.montar_previa_capa(
                                     foto_recortada, previa, amostra["nome"], amostra["tamanho_capa"])
+                                capa.thumbnail((LADO_PREVIA_REVISAO, LADO_PREVIA_REVISAO), Image.LANCZOS)
+                                grupo["capa"] = capa
+                            elif hasattr(rf, "montar_previa_sintetica"):
+                                capa = rf.montar_previa_sintetica(
+                                    foto_recortada,
+                                    amostra["tamanho_capa"],
+                                    amostra["nome"],
+                                    curso=grupo.get("curso") or "",
+                                    cor=grupo.get("cor"),
+                                )
                                 capa.thumbnail((LADO_PREVIA_REVISAO, LADO_PREVIA_REVISAO), Image.LANCZOS)
                                 grupo["capa"] = capa
                             else:
@@ -3644,10 +3798,12 @@ class AbaFotos:
             self._limpar_painel_nome()
         alvo = next((iid for iid, (_, entrada) in self._alunos_por_iid.items()
                      if (entrada["nome"], entrada["tamanho_capa"]) == self._aluno_escolhido), None)
+        if alvo is None and self._alunos_por_iid and not (self.trava_aluno_revisao.get() and self._aluno_nome):
+            alvo = next(iter(self._alunos_por_iid))
         if alvo:
             self.lista_alunos.selection_set(alvo)
             self.lista_alunos.see(alvo)
-            if not self._aluno_nome:
+            if not self._aluno_nome or (self._aluno_nome[1]["nome"], self._aluno_nome[1]["tamanho_capa"]) != self._aluno_escolhido:
                 self._selecionar_aluno_revisao()
 
     def _limpar_painel_nome(self):
@@ -3717,8 +3873,15 @@ class AbaFotos:
                 self.lista.see(arq_aluno.name)
             if self.arquivo != arq_aluno and not self.ocupado:
                 self.abrir(arq_aluno)
+            else:
+                self._atualizar_opcoes_foto_aluno(
+                    nome_explicito=entrada["nome"], tam_explicito=entrada["tamanho_foto"]
+                )
         else:
             self.foto_revisao_atual.set("Sem foto: prévia com fundo neutro")
+            self._atualizar_opcoes_foto_aluno(
+                nome_explicito=entrada["nome"], tam_explicito=entrada["tamanho_foto"]
+            )
         self.status_nome.set("Montando a prévia leve desta capa em memória...")
         cfg = dict(self.cfg)
         calibracao = dict(self._calibracao())
@@ -3808,13 +3971,11 @@ class AbaFotos:
             return
         if not self._aluno_nome or self._aluno_nome[1] is not entrada:
             return
-        if erro:
+        if erro and recortada is None:
             self.status_nome.set("Prévia indisponível: " + str(erro))
             return
-        if preset is None and previa is None:
-            self.status_nome.set("A base da capa " + entrada["tamanho_capa"]
-                                 + " ainda não foi montada: clique em \"Atualizar revisão\".")
-            return
+        if recortada is None:
+            recortada = Image.new("RGB", (400, 300), "#808080")
         self._previa_aluno = (recortada, preset, previa)
         self._renderizar_nome_revisao()
 
@@ -3850,20 +4011,29 @@ class AbaFotos:
         self._escala_tocada[linha] = True
         self._nome_mudou()
 
-    def _renderizar_nome_revisao(self):
+    def _renderizar_nome_revisao(self, rapido=False):
 
         self._render_nome_pendente = None
         if not self._aluno_nome or not self._previa_aluno:
             return
         rf = self.rf
-        _, entrada = self._aluno_nome
+        grupo, entrada = self._aluno_nome
         recortada, preset, previa = self._previa_aluno
         tamanho = entrada["tamanho_capa"]
         ajuste = self._ajuste_dos_controles()
         if preset:
-            capa = rf.montar_previa_preset(recortada, preset, entrada["nome"], ajuste)
+            capa = rf.montar_previa_preset(recortada, preset, entrada["nome"], ajuste, rapido=rapido)
+        elif previa:
+            capa = rf.montar_previa_capa(recortada, previa, entrada["nome"], tamanho, ajuste, rapido=rapido)
         else:
-            capa = rf.montar_previa_capa(recortada, previa, entrada["nome"], tamanho, ajuste)
+            capa = rf.montar_previa_sintetica(
+                recortada,
+                tamanho,
+                entrada["nome"],
+                curso=(grupo.get("curso") if grupo else entrada.get("curso")) or "",
+                cor=(grupo.get("cor") if grupo else entrada.get("cor")),
+                ajuste=ajuste,
+            )
         layout = rf.calcular_layout_nome(tamanho, entrada["nome"], ajuste)
 
         self._preenchendo_nome = True
@@ -4509,28 +4679,54 @@ class AbaFotos:
         self._atualizar_opcoes_foto_aluno()
         self.tela.focus_set()
 
-    def _atualizar_opcoes_foto_aluno(self):
-        """Preenche a caixa de Troca Rápida com as melhores fotos avaliadas da subpasta deste formando."""
+    def _atualizar_opcoes_foto_aluno(self, nome_explicito=None, tam_explicito=None):
+        """Preenche a Galeria Visual das 7 fotos sugeridas (com miniaturas) e a lista de troca rápida."""
 
         self._opcoes_atuais_lista = []
         self._aviso_opcoes_foto_atual = ""
-        if not self.arquivo or not self.rf or not hasattr(self.rf, "ler_opcoes_foto"):
+        rf = self._modulo() if self.rf is None else self.rf
+        if not rf:
+            return
+
+        nome_aluno = nome_explicito or (rf.nome_do_aluno(self.arquivo) if self.arquivo else "")
+        tam = tam_explicito or self.tam.get() or "30X20"
+        if not nome_aluno and self._aluno_nome:
+            nome_aluno = self._aluno_nome[1].get("nome") or ""
+            tam = self._aluno_nome[1].get("tamanho_foto") or tam
+
+        if not nome_aluno:
             self.opcao_foto_var.set("")
             self.combo_opcoes_foto.configure(values=[], state="disabled")
             self.botao_trocar_opcao.configure(state="disabled")
+            for idx_b, btn in enumerate(getattr(self, "_botoes_grid_7", [])):
+                btn.configure(
+                    image=self._placeholder_grid_7_tk,
+                    text=f"#{idx_b + 1}\n--\nC:-- N:-- B:--",
+                    state="disabled",
+                    background=COR_CAMPO,
+                )
             return
 
-        nome_aluno = self.rf.nome_do_aluno(self.arquivo)
-        tam = self.tam.get()
-        chave_op = f"{self.rf.chave(nome_aluno)}|{tam}"
-        dados_op = self.rf.ler_opcoes_foto().get(chave_op)
+        if hasattr(rf, "obter_opcoes_aluno_inteligente"):
+            dados_op = rf.obter_opcoes_aluno_inteligente(
+                nome_aluno, tam, self.cfg, calib=self._calibracao(), arquivo_atual=self.arquivo
+            )
+        else:
+            chave_op = f"{rf.chave(nome_aluno)}|{tam}"
+            dados_op = rf.ler_opcoes_foto().get(chave_op)
+
         candidatas = (dados_op or {}).get("candidatas") or []
         if not candidatas:
-            self.opcao_foto_var.set("Use 'Escolher Melhores Fotos'")
+            self.opcao_foto_var.set("Clique em 'Escolher Melhores Fotos'")
             self.combo_opcoes_foto.configure(values=[], state="disabled")
             self.botao_trocar_opcao.configure(state="disabled")
             for idx_b, btn in enumerate(getattr(self, "_botoes_grid_7", [])):
-                btn.configure(text=f"#{idx_b + 1}\n--\nC:-- N:-- B:--", state="disabled", background=COR_CAMPO)
+                btn.configure(
+                    image=self._placeholder_grid_7_tk,
+                    text=f"#{idx_b + 1}\n--\nC:-- N:-- B:--",
+                    state="disabled",
+                    background=COR_CAMPO,
+                )
             return
 
         self._aviso_opcoes_foto_atual = str((dados_op or {}).get("aviso_revisao") or "")
@@ -4552,7 +4748,11 @@ class AbaFotos:
             if str(cand.get("caminho", "")) == escolhida_atual:
                 indice_atual = idx
 
-        # Atualiza os 7 cartões da Galeria Fixa abaixo da Prévia Grande (com indicador de 1 Rosto)
+        # Atualiza os 7 cartões da Galeria Fixa abaixo da Prévia Grande (com miniatura + indicadores)
+        self._token_thumbs_grid_7 = getattr(self, "_token_thumbs_grid_7", 0) + 1
+        meu_token_g7 = self._token_thumbs_grid_7
+        tarefas_thumb = []
+
         for idx_b, btn in enumerate(getattr(self, "_botoes_grid_7", [])):
             if idx_b < len(self._opcoes_atuais_lista):
                 c_item = self._opcoes_atuais_lista[idx_b]
@@ -4568,14 +4768,71 @@ class AbaFotos:
                     f"{str(c_item.get('nome_arquivo', ''))[:16]}\n"
                     f"C:{c_pct}%  N:{n_pct}%  B:{b_pct}%"
                 )
+                ch_thumb = (str(c_item.get("caminho") or ""), tam, tuple(c_item.get("caixa") or ()))
+                im_cache = self._cache_thumbs_7_opcoes.get(ch_thumb)
+                if im_cache is not None:
+                    self._imagens_grid_7_tk[idx_b] = im_cache
+                    img_usar = im_cache
+                else:
+                    img_usar = self._placeholder_grid_7_tk
+                    tarefas_thumb.append((idx_b, c_item, ch_thumb))
+
                 btn.configure(
+                    image=img_usar,
+                    compound="top",
                     text=txt_card,
                     state="normal",
                     background="#1e3a5f" if ativa else COR_CAMPO,
                     foreground="#4ade80" if ativa else COR_TEXTO,
                 )
             else:
-                btn.configure(text=f"#{idx_b + 1}\n--\nC:-- N:-- B:--", state="disabled", background=COR_CAMPO)
+                btn.configure(
+                    image=self._placeholder_grid_7_tk,
+                    compound="top",
+                    text=f"#{idx_b + 1}\n--\nC:-- N:-- B:--",
+                    state="disabled",
+                    background=COR_CAMPO,
+                )
+
+        if tarefas_thumb:
+            cfg_snap = dict(self.cfg)
+            calib_snap = dict(self._calibracao())
+
+            def _carregar_thumbs_galeria_7_bg():
+                for idx_t, cand_t, ch_t in tarefas_thumb:
+                    if getattr(self, "_token_thumbs_grid_7", 0) != meu_token_g7:
+                        return
+                    try:
+                        pil_t = rf.obter_miniatura_candidata_rapida(
+                            cand_t.get("caminho"),
+                            tam,
+                            cfg_snap,
+                            calib=calib_snap,
+                            caixa_sugerida=cand_t.get("caixa"),
+                            lado_max=96,
+                            modo="recorte",
+                            tamanho_canvas=(96, 72),
+                        )
+                    except Exception:
+                        pil_t = None
+                    if pil_t is not None and getattr(self, "_token_thumbs_grid_7", 0) == meu_token_g7:
+                        def _aplicar_thumb_g7(i_btn=idx_t, im_p=pil_t, chave_c=ch_t):
+                            if getattr(self, "_token_thumbs_grid_7", 0) != meu_token_g7:
+                                return
+                            if i_btn >= len(self._botoes_grid_7):
+                                return
+                            b_w = self._botoes_grid_7[i_btn]
+                            if not b_w.winfo_exists():
+                                return
+                            tk_t = ImageTk.PhotoImage(im_p)
+                            if len(self._cache_thumbs_7_opcoes) > 140:
+                                self._cache_thumbs_7_opcoes.clear()
+                            self._cache_thumbs_7_opcoes[chave_c] = tk_t
+                            self._imagens_grid_7_tk[i_btn] = tk_t
+                            b_w.configure(image=tk_t)
+                        self.root.after(0, _aplicar_thumb_g7)
+
+            threading.Thread(target=_carregar_thumbs_galeria_7_bg, daemon=True).start()
 
         self.combo_opcoes_foto.configure(values=rotulos, state="readonly")
         self.combo_opcoes_foto.current(indice_atual)
@@ -4913,39 +5170,42 @@ class AbaFotos:
         if not self.fonte or not self.caixa:
             return
 
+        arrastando = bool(getattr(self, "_arrasto", None))
         f = self.fator_red
         caixa_red = tuple(round(c * f) for c in self.caixa)
         mw, mh = self._molde()
         escala = min(1.0, LADO_PREVIA_REVISAO / max(mw, mh))
-        filtro_interp = Image.BILINEAR if getattr(self, "_arrasto", None) else Image.LANCZOS
+        filtro_interp = Image.BILINEAR if arrastando else Image.LANCZOS
         recortada = self.reduzida.crop(caixa_red).resize(
             (max(1, round(mw * escala)), max(1, round(mh * escala))), filtro_interp)
 
-        imagem = recortada
-        if self.modo_previa.get() == "capa":
-            capa = self._capa_atual()
-            preset = self._preset_da_foto(capa)
-            previa = None if preset else self._previa_capa(capa)
-            nome = self.rf.nome_do_aluno(self.arquivo) if self.arquivo else None
-            if preset:
-                imagem = self.rf.montar_previa_preset(recortada, preset, nome)
-            elif previa:
-                imagem = self.rf.montar_previa_capa(recortada, previa, nome, capa)
-            else:
-                self.alerta.set("Prévia da capa ainda não gerada: clique em \"Gerar prévia da capa\".")
-
-        # Atualiza ao vivo a Prévia Grande da Capa no centro enquanto arrasta o recorte!
+        # Se o aluno atual da Revisão corresponde a esta foto, renderiza UMA única vez!
+        mesmo_aluno_revisao = False
         if self._aluno_nome and self._previa_aluno and self._aluno_nome[1].get("foto") and self.arquivo:
             try:
-                if Path(self._aluno_nome[1]["foto"]).resolve() == self.arquivo.resolve():
-                    self._previa_aluno = (recortada, self._previa_aluno[1], self._previa_aluno[2])
-                    self._renderizar_nome_revisao()
-                elif imagem is not recortada:
-                    self._mostrar_previa_revisao(imagem)
+                mesmo_aluno_revisao = Path(self._aluno_nome[1]["foto"]).resolve() == self.arquivo.resolve()
             except Exception:
-                pass
-        elif imagem is not recortada:
-            self._mostrar_previa_revisao(imagem)
+                mesmo_aluno_revisao = False
+
+        if mesmo_aluno_revisao:
+            self._previa_aluno = (recortada, self._previa_aluno[1], self._previa_aluno[2])
+            self._renderizar_nome_revisao(rapido=arrastando)
+            imagem = self._capa_revisao_atual if self._capa_revisao_atual is not None else recortada
+        else:
+            imagem = recortada
+            if self.modo_previa.get() == "capa":
+                capa = self._capa_atual()
+                preset = self._preset_da_foto(capa)
+                previa = None if preset else self._previa_capa(capa)
+                nome = self.rf.nome_do_aluno(self.arquivo) if self.arquivo else None
+                if preset:
+                    imagem = self.rf.montar_previa_preset(recortada, preset, nome, rapido=arrastando)
+                elif previa:
+                    imagem = self.rf.montar_previa_capa(recortada, previa, nome, capa, rapido=arrastando)
+                elif hasattr(self.rf, "montar_previa_sintetica"):
+                    imagem = self.rf.montar_previa_sintetica(recortada, capa, nome)
+            if imagem is not recortada:
+                self._mostrar_previa_revisao(imagem)
 
         imagem_min = imagem.copy()
         imagem_min.thumbnail((380, 380), Image.LANCZOS)

@@ -127,6 +127,7 @@ MOLDES_PADRAO = {
     "20X20": (2694, 3012),
     "30X20": (3874, 3012),
     "24X34": (4160, 6240),
+    "30X22": (3874, 3012),
 }
 
 # Usado enquanto um tamanho não tiver fotos prontas para calibrar
@@ -682,15 +683,9 @@ def verificar_cache_analise_subpastas(
 
     if processar_pendentes_pool and len(pendentes_pasta) >= 2:
         try:
-            if not MODELO_YUNET.is_file():
-                urllib.request.urlretrieve(URL_YUNET, MODELO_YUNET)
             num_nucleos = min(len(pendentes_pasta), hw["nucleos_usados"])
-            with multiprocessing.Pool(
-                processes=num_nucleos,
-                initializer=_init_worker_pool_subpastas,
-                initargs=(hw["usar_gpu_opencl"],),
-            ) as pool:
-                for ch_an, ch_r, m_base in pool.imap_unordered(_extrair_metricas_foto_worker, pendentes_pasta, chunksize=2):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_nucleos) as pool:
+                for ch_an, ch_r, m_base in pool.map(_extrair_metricas_foto_worker, pendentes_pasta):
                     if m_base is not None:
                         with _cache_rostos_lock:
                             cache_an[ch_an] = m_base
@@ -781,28 +776,49 @@ def detectar_rosto_cache(caminho, img=None):
     return rosto
 
 
+_yunet_falhou_sessao = False
+
+
 def detector_yunet():
+    global _yunet_falhou_sessao
+    if _yunet_falhou_sessao or not hasattr(cv2, "FaceDetectorYN"):
+        return None
     det = getattr(_tls_detector, "detector", None)
     if det is None:
-        with _cache_rostos_lock:
+        try:
+            with _cache_rostos_lock:
+                if not MODELO_YUNET.is_file():
+                    req = urllib.request.Request(URL_YUNET, headers=NAVEGADOR)
+                    with urllib.request.urlopen(req, timeout=8) as r:
+                        dados_onnx = r.read()
+                    if dados_onnx:
+                        temp_m = MODELO_YUNET.with_suffix(".tmp")
+                        temp_m.write_bytes(dados_onnx)
+                        os.replace(temp_m, MODELO_YUNET)
             if not MODELO_YUNET.is_file():
-                print("Baixando modelo de detecção de rosto...")
-                urllib.request.urlretrieve(URL_YUNET, MODELO_YUNET)
-        det = cv2.FaceDetectorYN.create(
-            str(MODELO_YUNET), "", (320, 320), 0.55, 0.3, 5000
-        )
-        _tls_detector.detector = det
+                _yunet_falhou_sessao = True
+                return None
+            det = cv2.FaceDetectorYN.create(
+                str(MODELO_YUNET), "", (320, 320), 0.55, 0.3, 5000
+            )
+            _tls_detector.detector = det
+        except Exception:
+            _yunet_falhou_sessao = True
+            return None
     return det
 
 
 def _detector_haar_tls():
-    """Instância Haar Cascade isolada por thread (sem lock global) apenas para fallback individual."""
+    """Instância Haar Cascade isolada por thread (sem lock global) para detecção rápida ou fallback."""
     haar = getattr(_tls_detector, "haar", None)
     if haar is None and hasattr(cv2, "CascadeClassifier"):
-        haar = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        _tls_detector.haar = haar
+        try:
+            haar = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+            _tls_detector.haar = haar
+        except Exception:
+            haar = None
     return haar
 
 
@@ -1021,19 +1037,31 @@ def abrir_foto_para_analise(caminho, lado_max=LADO_DETECCAO):
 def abrir_foto_previa_rapida(caminho, lado_max=LADO_PREVIA_RAPIDA):
     """
     Abre uma foto para prévia na UI (aba Revisão / Editor) usando DCT rápido no tamanho `lado_max`.
+    Se o decodificador OpenCV falhar (ex.: JPEG CMYK ou TIFF especial), faz fallback seguro para PIL.
     Retorna (img_reduzida_rgb, (W_orig, H_orig), fator_reducao).
     """
-    bgr, (W_orig, H_orig) = _decodificar_bgr_para_analise(caminho, lado_max)
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    img_red = Image.fromarray(rgb)
+    try:
+        bgr, (W_orig, H_orig) = _decodificar_bgr_para_analise(caminho, lado_max)
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        img_red = Image.fromarray(rgb)
+    except Exception:
+        img_orig, _, _ = abrir_foto(caminho)
+        W_orig, H_orig = img_orig.size
+        fator_p = min(1.0, float(lado_max) / float(max(1, W_orig, H_orig)))
+        if fator_p < 1.0:
+            img_red = img_orig.resize(
+                (max(1, round(W_orig * fator_p)), max(1, round(H_orig * fator_p))), Image.BILINEAR
+            )
+        else:
+            img_red = img_orig
     fator = img_red.width / float(max(1, W_orig))
     return img_red, (W_orig, H_orig), fator
 
 
-def detectar_rostos_bgr(bgr, tamanho_original=None, usar_haar_fallback=False):
+def detectar_rostos_bgr(bgr, tamanho_original=None, usar_haar_fallback=True):
     """
     Detecta todos os rostos diretamente em uma matriz BGR usando YuNet ONNX em ~6ms (sem GIL).
-    Em seleção em lote de subpastas (`usar_haar_fallback=False`), evita o Haar Cascade lento.
+    Se o YuNet não estiver disponível ou não encontrar rosto, faz fallback seguro para Haar Cascade.
     """
     if bgr is None or bgr.size == 0:
         return []
@@ -1053,8 +1081,13 @@ def detectar_rostos_bgr(bgr, tamanho_original=None, usar_haar_fallback=False):
     escala_y = ph_det / float(max(1, H_orig))
 
     det = detector_yunet()
-    det.setInputSize((pw_det, ph_det))
-    _, faces = det.detect(bgr_det)
+    faces = None
+    if det is not None:
+        try:
+            det.setInputSize((pw_det, ph_det))
+            _, faces = det.detect(bgr_det)
+        except Exception:
+            faces = None
 
     resultado = []
     if faces is not None and len(faces):
@@ -1091,27 +1124,33 @@ def detectar_rostos_bgr(bgr, tamanho_original=None, usar_haar_fallback=False):
         if resultado:
             return resultado
 
-    if not usar_haar_fallback:
+    if not usar_haar_fallback and det is not None:
         return []
 
     haar = _detector_haar_tls()
     if haar is None:
         return []
-    cinza = cv2.cvtColor(bgr_det, cv2.COLOR_BGR2GRAY)
-    caixas = haar.detectMultiScale(cinza, 1.15, 5, minSize=(28, 28))
+    try:
+        cinza = cv2.cvtColor(bgr_det, cv2.COLOR_BGR2GRAY)
+        caixas = haar.detectMultiScale(cinza, 1.15, 5, minSize=(28, 28))
+    except Exception:
+        caixas = ()
     if len(caixas):
-        maior = max(caixas, key=lambda r: r[2] * r[3])
-        x = float(maior[0]) / escala_x
-        y = float(maior[1]) / escala_y
-        fw = float(maior[2]) / escala_x
-        fh = (float(maior[3]) / escala_y) * 0.9
-        return [{
-            "x": x, "y": y, "w": fw, "h": fh,
-            "cx": x + fw / 2.0,
-            "olhos_y": y + fh * 0.4,
-            "score": 0.65,
-            "metodo": "haar",
-        }]
+        rostos_haar = []
+        for r_box in caixas:
+            x = float(r_box[0]) / escala_x
+            y = float(r_box[1]) / escala_y
+            fw = float(r_box[2]) / escala_x
+            fh = (float(r_box[3]) / escala_y) * 0.9
+            rostos_haar.append({
+                "x": x, "y": y, "w": fw, "h": fh,
+                "cx": x + fw / 2.0,
+                "olhos_y": y + fh * 0.4,
+                "score": 0.65,
+                "metodo": "haar",
+            })
+        rostos_haar.sort(key=lambda r: r["w"] * r["h"], reverse=True)
+        return rostos_haar
     return []
 
 
@@ -1235,13 +1274,21 @@ def _extrair_metricas_base_foto(caminho, mtime_ns=None, fsize=None, usar_copia_l
         pass
 
     caminho_proxy_str = ""
-    if usar_copia_leve:
-        bgr_red, (W, H), caminho_proxy_str, _ = _garantir_copia_leve_local(
-            caminho_p, mtime_ns=mtime_ns, fsize=fsize
-        )
-    else:
-        bgr_red, (W, H) = _decodificar_bgr_para_analise(caminho_p, LADO_DETECCAO)
-    rostos = detectar_rostos_bgr(bgr_red, tamanho_original=(W, H), usar_haar_fallback=False)
+    try:
+        if usar_copia_leve:
+            bgr_red, (W, H), caminho_proxy_str, _ = _garantir_copia_leve_local(
+                caminho_p, mtime_ns=mtime_ns, fsize=fsize
+            )
+        else:
+            bgr_red, (W, H) = _decodificar_bgr_para_analise(caminho_p, LADO_DETECCAO)
+        rostos = detectar_rostos_bgr(bgr_red, tamanho_original=(W, H), usar_haar_fallback=True)
+    except Exception:
+        try:
+            W, H = tamanho_rapido(caminho_p)
+        except Exception:
+            W, H = 3000, 4000
+        bgr_red = None
+        rostos = []
 
     # Aproveita para alimentar também o cache de rosto da aba Revisão
     if chave_rosto_cache is not None:
@@ -1937,6 +1984,7 @@ def _processar_subpasta_worker(tarefa):
             opcoes_aluno[chave_op] = {
                 "nome": nome_aluno,
                 "tamanho": tam,
+                "subpasta": str(sub),
                 "arquivo_destino": str(destino),
                 "escolhida": campea["caminho"],
                 "aviso_revisao": campea.get("aviso_revisao", ""),
@@ -2154,6 +2202,7 @@ def _processar_subpasta_worker(tarefa):
         opcoes_aluno[chave_op] = {
             "nome": nome_aluno,
             "tamanho": tam,
+            "subpasta": str(sub),
             "arquivo_destino": str(destino),
             "escolhida": campea["caminho"],
             "aviso_revisao": campea.get("aviso_revisao", ""),
@@ -2163,6 +2212,7 @@ def _processar_subpasta_worker(tarefa):
 
     sub_cache_entry = {
         "assinatura": assinatura_atual,
+        "subpasta": str(sub),
         "escolhidas": escolhidas_aluno,
         "avisos": avisos_aluno,
         "candidatas_por_tam": candidatas_por_tam,
@@ -2195,6 +2245,77 @@ def _processar_subpasta_worker(tarefa):
     }
 
 
+PASTAS_IGNORADAS_SUBPASTAS = {
+    "_originais",
+    "_originais_fotos",
+    ".cache_proxies_capaz",
+    "previa_capas",
+    "historico_sessoes",
+    "__pycache__",
+}
+
+
+def _tem_imagens_diretas(pasta_p):
+    try:
+        with os.scandir(pasta_p) as it:
+            for entry in it:
+                if entry.is_file(follow_symlinks=False) and not entry.name.startswith(("._", ".")):
+                    if os.path.splitext(entry.name)[1].lower() in EXTENSOES:
+                        return True
+    except OSError:
+        pass
+    return False
+
+
+def _descobrir_subpastas_formandos(pasta_mae):
+    """
+    Localiza todas as subpastas reais de formandos dentro de `pasta_mae`, ignorando pastas técnicas
+    (`_ORIGINAIS`, `.cache_proxies_capaz`, `previa_capas`, etc.) e descendo 1 nível caso as subpastas
+    estejam agrupadas por turma/curso (ex.: `PASTA / DIREITO / MARIA DA SILVA`).
+    """
+    pasta_p = Path(pasta_mae)
+    if not pasta_p.is_dir():
+        return []
+    subpastas = []
+    try:
+        with os.scandir(pasta_p) as it:
+            nivel1 = []
+            for entry in it:
+                nome_low = entry.name.lower()
+                if entry.name.startswith(("_", ".")) or nome_low in PASTAS_IGNORADAS_SUBPASTAS:
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    nivel1.append(Path(entry.path))
+    except OSError:
+        return []
+
+    for d1 in nivel1:
+        if _tem_imagens_diretas(d1):
+            subpastas.append(d1)
+            continue
+        # Se não tem fotos diretas, verifica se é uma pasta de turma/curso com subpastas de alunos dentro
+        filhas = []
+        try:
+            with os.scandir(d1) as it2:
+                for e2 in it2:
+                    if e2.name.startswith(("_", ".")) or e2.name.lower() in PASTAS_IGNORADAS_SUBPASTAS:
+                        continue
+                    if e2.is_dir(follow_symlinks=False):
+                        filhas.append(Path(e2.path))
+        except OSError:
+            pass
+        if len(filhas) >= 2:
+            for d2 in filhas:
+                if _listar_imagens_subpasta_com_stat(d2):
+                    subpastas.append(d2)
+        elif len(filhas) == 1 and _listar_imagens_subpasta_com_stat(d1):
+            # Ex.: pasta do aluno contendo subpasta "FOTOS"
+            subpastas.append(d1)
+
+    subpastas.sort(key=lambda d: chave(d.name))
+    return subpastas
+
+
 def escolher_melhores_fotos_subpastas(
     pasta_subpastas,
     cfg,
@@ -2210,11 +2331,10 @@ def escolher_melhores_fotos_subpastas(
 ):
     """
     Divide as subpastas dos formandos entre os núcleos da CPU permitidos pelo limite de hardware
-    (`limite_cpu_pct`) usando `multiprocessing.Pool` + GPU OpenCL em prioridade baixa:
+    (`limite_cpu_pct`) usando `ThreadPoolExecutor` (com liberação de GIL C++ no OpenCV/YuNet) + GPU OpenCL:
       1. Faz primeiro uma SEPARAÇÃO RÁPIDA POR ORIENTAÇÃO via cabeçalho (< 0.08ms/foto, sem decodificar),
          filtrando apenas as fotos na orientação certa do molde.
-      2. Analisa poucas fotos na orientação certa usando cópia leve local (`.cache_proxies_capaz`) e
-         para imediatamente ao achar a primeira foto boa, sem demorar escolhendo critérios.
+      2. Identifica primeiro os rostos e prioriza estritamente fotos com 1 única pessoa (`qtd_pessoas == 1`).
       3. Copia em resolução ORIGINAL apenas a foto campeã escolhida para a pasta FOTO.
     """
     pasta_mae = Path(pasta_subpastas)
@@ -2240,11 +2360,14 @@ def escolher_melhores_fotos_subpastas(
         except Exception:
             pass
 
-    if not MODELO_YUNET.is_file():
-        try:
-            urllib.request.urlretrieve(URL_YUNET, MODELO_YUNET)
-        except Exception:
-            pass
+    try:
+        if hasattr(cv2, "ocl"):
+            cv2.ocl.setUseOpenCL(bool(hw["usar_gpu_opencl"] and cv2.ocl.haveOpenCL()))
+    except Exception:
+        pass
+
+    # Inicializa detector uma vez antes das threads para aquecer o modelo em memória
+    detector_yunet()
 
     verificar_cache_analise_subpastas(
         cfg["fotos"],
@@ -2257,16 +2380,13 @@ def escolher_melhores_fotos_subpastas(
     destinos_map = cache_an.setdefault("_destinos_copiados", {})
     _salvar_cache_analise_subpastas()
 
-    subpastas = []
-    try:
-        with os.scandir(pasta_mae) as it:
-            for entry in it:
-                if not entry.name.startswith(("_", ".")) and entry.is_dir(follow_symlinks=False):
-                    subpastas.append(Path(entry.path))
-    except OSError:
-        pass
-    subpastas.sort(key=lambda d: chave(d.name))
-    if not subpastas:
+    subpastas = _descobrir_subpastas_formandos(pasta_mae)
+    if subpastas:
+        try:
+            gravar_config({"subpastas_fotos_dir": str(pasta_mae)})
+        except Exception:
+            pass
+    else:
         subpastas = [pasta_mae]
 
     mapa_planos = {}
@@ -2371,7 +2491,6 @@ def escolher_melhores_fotos_subpastas(
             _salvar_cache_analise_subpastas()
             novas_acumuladas_desde_save = 0
 
-    # Caso 1: Múltiplas subpastas -> divide as subpastas entre os núcleos permitidos pelo limite de CPU
     if total_sub >= 2:
         num_processos = max(1, min(total_sub, nucleos_usados))
         if progresso_cb:
@@ -2380,74 +2499,18 @@ def escolher_melhores_fotos_subpastas(
                 total_sub,
                 f"Separando rápido por Orientação com {tag_hw} ({hw['nucleos_livres']} núcleos livres)...",
             )
-        usou_mp_pool = False
-        try:
-            with multiprocessing.Pool(
-                processes=num_processos,
-                initializer=_init_worker_pool_subpastas,
-                initargs=(hw["usar_gpu_opencl"],),
-            ) as pool:
-                concluidas = 0
-                for res in pool.imap_unordered(_processar_subpasta_worker, tarefas, chunksize=1):
-                    concluidas += 1
-                    _integrar_resultado_worker(res, concluidas)
-            usou_mp_pool = True
-        except Exception:
-            usou_mp_pool = False
-
-        if not usou_mp_pool:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=num_processos) as tpool:
-                concluidas = 0
-                for res in tpool.map(_processar_subpasta_worker, tarefas):
-                    concluidas += 1
-                    _integrar_resultado_worker(res, concluidas)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_processos) as tpool:
+            concluidas = 0
+            futures = [tpool.submit(_processar_subpasta_worker, t) for t in tarefas]
+            for fut in concurrent.futures.as_completed(futures):
+                concluidas += 1
+                try:
+                    res = fut.result()
+                except Exception:
+                    res = None
+                _integrar_resultado_worker(res, concluidas)
     else:
-        # Caso 2: Apenas 1 pasta selecionada -> separa primeiro pela orientação via cabeçalho e usa Pool só nas prioritárias
         t_unica = tarefas[0]
-        sub_unica = Path(t_unica["sub_str"])
-        itens_unica = _listar_imagens_subpasta_com_stat(sub_unica)
-        faltantes_bruto = []
-        for arq, mtime_ns, fsize in itens_unica:
-            ch_rosto = f"{_norm_caminho_rapido(arq)}|{mtime_ns}|{fsize}"
-            ch_an = f"{ch_rosto}|v2"
-            if ch_an not in cache_an:
-                faltantes_bruto.append((arq, mtime_ns, fsize, ch_an, ch_rosto))
-
-        grupo_ideal_u, _ = _separar_por_orientacao_rapido(
-            faltantes_bruto,
-            t_unica["tamanhos_necessarios"],
-            cfg["moldes"],
-            max_orientacao_ideal=MAX_TRIAGEM_ORIENTACAO_CABECALHO,
-        )
-        faltantes_unica = [
-            (str(arq), mtime_ns, fsize, usar_copia_leve)
-            for arq, mtime_ns, fsize, _, _ in grupo_ideal_u[:MAX_FOTOS_POR_ONDA_SUBPASTA]
-        ]
-
-        if len(faltantes_unica) >= 2:
-            num_processos = max(1, min(len(faltantes_unica), nucleos_usados))
-            try:
-                with multiprocessing.Pool(
-                    processes=num_processos,
-                    initializer=_init_worker_pool_subpastas,
-                    initargs=(hw["usar_gpu_opencl"],),
-                ) as pool:
-                    if progresso_cb:
-                        progresso_cb(
-                            1,
-                            1,
-                            f"Hardware [{tag_hw}] · Separando rápido por Orientação em {t_unica['nome_aluno']} ({len(faltantes_unica)} fotos prioritárias)...",
-                        )
-                    for ch_an, ch_r, m_base in pool.imap_unordered(_extrair_metricas_foto_worker, faltantes_unica, chunksize=1):
-                        if m_base is not None:
-                            with _cache_rostos_lock:
-                                cache_an[ch_an] = m_base
-                                rostos_l = m_base.get("rostos") or []
-                                cache_r[ch_r] = rostos_l[0] if rostos_l else None
-                _salvar_cache_analise_subpastas()
-            except Exception:
-                pass
-
         res_unico = _processar_subpasta_worker(t_unica)
         _integrar_resultado_worker(res_unico, 1)
 
@@ -2465,12 +2528,280 @@ def escolher_melhores_fotos_subpastas(
     return [item for _, item in resultados_ordenados]
 
 
+RE_SUFIXO_NUMERACAO_FOTO = re.compile(r"(?i)[\s_\-\.]*(?:\(\d+\)|\[\d+\]|copy|\bcopia\b|\bimg[_\-\s]*\d+|\bdsc[_\-\s]*\d+|\bfoto[_\-\s]*\d+|\b\d{1,3})$")
+
+
+def _nome_base_agrupamento(caminho_ou_nome):
+    """Normaliza o nome do formando removendo também sufixos de numeração como 'Maria (1)', 'Maria_02'."""
+    limpo = limpar_tamanho_do_nome(caminho_ou_nome)
+    limpo = RE_SUFIXO_NUMERACAO_FOTO.sub("", limpo).strip()
+    return formatar_nome(limpo) or formatar_nome(caminho_ou_nome)
+
+
+def _ordenar_avaliacoes_candidatas(avaliacoes):
+    avaliacoes.sort(
+        key=lambda a: (
+            1 if (a.get("valida") and a.get("qtd_pessoas") == 1) else 0,
+            1 if a.get("valida") else 0,
+            -abs(int(a.get("qtd_pessoas") or 99) - 1),
+            1 if a.get("orientacao_ideal") else 0,
+            int(a.get("encaixe_pct", 0)),
+            int(a.get("densidade_rosto_px", 0)),
+            1 if a.get("aprovada_qualidade") else 0,
+            float(a.get("nota", 0.0)),
+        ),
+        reverse=True,
+    )
+    individuais_validas = [a for a in avaliacoes if a.get("valida") and a.get("qtd_pessoas") == 1]
+    if individuais_validas:
+        outras_reserva = [a for a in avaliacoes if not (a.get("valida") and a.get("qtd_pessoas") == 1)]
+        return individuais_validas + outras_reserva
+    return avaliacoes
+
+
+def obter_opcoes_aluno_inteligente(nome_aluno, tam, cfg, calib=None, arquivo_atual=None):
+    """
+    Localiza ou constrói automaticamente as até 7 melhores fotos candidatas de um formando
+    para exibir tanto na aba 'Revisão e Recorte' quanto na 'Tela: Escolher 1 entre as 7 Melhores':
+      1. Verifica `opcoes_por_foto.json` pela chave exata `chave(nome)|tam` ou por qualquer tamanho do mesmo aluno.
+      2. Se não estiver em `opcoes_por_foto.json`, procura automaticamente a subpasta do aluno em
+         `subpastas_fotos_dir`, `cfg["fotos"]`, `cfg["backup"]` (`_ORIGINAIS`) ou `cfg["fotos"].parent`.
+      3. Se não houver subpasta, agrupa fotos do aluno na pasta `FOTO` / `_ORIGINAIS` (incluindo a foto atual)
+         e calcula os indicadores reais de Contraste, Nitidez, Brilho e Rosto.
+    """
+    if calib is None:
+        calib = carregar_calibracao(cfg)
+
+    tam_str = str(tam or "30X20").upper()
+    tam_foto = "30X20" if tam_str == "30X22" else (tam_str if tam_str in ("20X20", "24X34", "30X20") else "30X20")
+    molde = cfg["moldes"].get(tam_foto, MOLDES_PADRAO.get(tam_foto, (3874, 3012)))
+    calib_tam = calib.get(tam_foto, CALIBRACAO_PADRAO)
+    amp_max = float(cfg.get("ampliacao_maxima", 1.2))
+
+    nome_limpo = formatar_nome(nome_aluno or (nome_do_aluno(arquivo_atual) if arquivo_atual else ""))
+    ch_aluno = chave(nome_limpo)
+    ch_base = chave(_nome_base_agrupamento(nome_limpo))
+    norm_arq_atual = _norm_caminho_rapido(arquivo_atual) if arquivo_atual else ""
+
+    opcoes_todas = ler_opcoes_foto()
+
+    # 1) Busca direta em opcoes_por_foto.json (chave exata)
+    for k_tentativa in (f"{ch_aluno}|{tam_foto}", f"{ch_aluno}|{tam_str}", f"{ch_base}|{tam_foto}"):
+        dados_op = opcoes_todas.get(k_tentativa)
+        if isinstance(dados_op, dict):
+            cands_existentes = [
+                c for c in (dados_op.get("candidatas") or [])
+                if isinstance(c, dict) and c.get("caminho") and Path(c["caminho"]).is_file()
+            ]
+            if cands_existentes:
+                dados_ret = dict(dados_op)
+                dados_ret["candidatas"] = cands_existentes[:7]
+                if not dados_ret.get("escolhida") or not Path(str(dados_ret.get("escolhida"))).is_file():
+                    dados_ret["escolhida"] = cands_existentes[0]["caminho"]
+                return dados_ret
+
+    # 2) Busca em opcoes_por_foto.json por outro tamanho do mesmo aluno ou pelo arquivo_destino
+    caminhos_candidatos = []
+    subpasta_conhecida = None
+    escolhida_anterior = None
+    for k_op, v_op in opcoes_todas.items():
+        if not isinstance(v_op, dict):
+            continue
+        ch_v = chave(limpar_tamanho_do_nome(v_op.get("nome") or k_op.split("|")[0]))
+        dest_v = _norm_caminho_rapido(v_op.get("arquivo_destino")) if v_op.get("arquivo_destino") else ""
+        if ch_v in (ch_aluno, ch_base) or (norm_arq_atual and dest_v == norm_arq_atual):
+            if v_op.get("subpasta") and Path(v_op["subpasta"]).is_dir():
+                subpasta_conhecida = Path(v_op["subpasta"])
+            if v_op.get("escolhida") and Path(str(v_op["escolhida"])).is_file():
+                escolhida_anterior = str(v_op["escolhida"])
+            for c in (v_op.get("candidatas") or []):
+                cam_c = c.get("caminho") if isinstance(c, dict) else None
+                if cam_c and Path(cam_c).is_file():
+                    caminhos_candidatos.append(Path(cam_c))
+
+    # 3) Se não achou subpasta ainda, procura subpasta correspondente no disco
+    if subpasta_conhecida is None and not caminhos_candidatos:
+        bruto_cfg = ler_config_bruto()
+        raizes_busca = []
+        for p_cand in (
+            bruto_cfg.get("subpastas_fotos_dir"),
+            cfg.get("fotos"),
+            cfg.get("backup"),
+            Path(cfg["fotos"]).parent if cfg.get("fotos") else None,
+        ):
+            if p_cand:
+                p_obj = Path(p_cand)
+                if p_obj.is_dir() and p_obj not in raizes_busca:
+                    raizes_busca.append(p_obj)
+
+        for raiz in raizes_busca:
+            for sub_d in _descobrir_subpastas_formandos(raiz):
+                ch_sub = chave(limpar_tamanho_do_nome(sub_d.name))
+                ch_sub_base = chave(_nome_base_agrupamento(sub_d.name))
+                if ch_sub in (ch_aluno, ch_base) or ch_sub_base in (ch_aluno, ch_base):
+                    subpasta_conhecida = sub_d
+                    break
+                if len(ch_aluno) >= 4 and (ch_aluno in ch_sub or ch_sub in ch_aluno):
+                    subpasta_conhecida = sub_d
+                    break
+            if subpasta_conhecida is not None:
+                break
+
+    if subpasta_conhecida is not None and not caminhos_candidatos:
+        itens_sub = _listar_imagens_subpasta_com_stat(subpasta_conhecida)
+        if itens_sub:
+            faltantes = []
+            for arq, mtime_ns, fsize in itens_sub:
+                ch_rosto = f"{_norm_caminho_rapido(arq)}|{mtime_ns}|{fsize}"
+                faltantes.append((arq, mtime_ns, fsize, f"{ch_rosto}|v3", ch_rosto))
+            g_ideal, g_res = _separar_por_orientacao_rapido(
+                faltantes, [tam_foto], cfg["moldes"], max_orientacao_ideal=MAX_TRIAGEM_ORIENTACAO_CABECALHO
+            )
+            for arq, _, _, _, _ in (g_ideal + g_res)[:14]:
+                caminhos_candidatos.append(arq)
+
+    # 4) Também inclui fotos do mesmo aluno soltas em FOTO ou _ORIGINAIS
+    if not caminhos_candidatos:
+        vistos_norm = set()
+        if arquivo_atual and Path(arquivo_atual).is_file():
+            orig_at = fonte_original(Path(arquivo_atual), cfg)
+            if orig_at.is_file():
+                caminhos_candidatos.append(orig_at)
+                vistos_norm.add(_norm_caminho_rapido(orig_at))
+        for pasta_busca in (cfg.get("backup"), cfg.get("fotos")):
+            if not pasta_busca or not Path(pasta_busca).is_dir():
+                continue
+            for f in listar_fotos(pasta_busca):
+                norm_f = _norm_caminho_rapido(f)
+                if norm_f in vistos_norm:
+                    continue
+                ch_f = chave(nome_do_aluno(f))
+                ch_f_base = chave(_nome_base_agrupamento(f.stem))
+                if ch_f in (ch_aluno, ch_base) or ch_f_base in (ch_aluno, ch_base):
+                    orig_f = fonte_original(f, cfg)
+                    norm_of = _norm_caminho_rapido(orig_f)
+                    if norm_of not in vistos_norm and orig_f.is_file():
+                        caminhos_candidatos.append(orig_f)
+                        vistos_norm.add(norm_of)
+
+    if not caminhos_candidatos:
+        return None
+
+    # Avalia e ordena as candidatas encontradas
+    usar_copia_leve = bool(cfg.get("usar_copia_leve_local", USAR_COPIA_LEVE_LOCAL_PADRAO))
+    avaliacoes = []
+    vistos_c = set()
+    for arq_c in caminhos_candidatos:
+        norm_c = _norm_caminho_rapido(arq_c)
+        if norm_c in vistos_c or not Path(arq_c).is_file():
+            continue
+        vistos_c.add(norm_c)
+        try:
+            m_base = _extrair_metricas_base_foto(arq_c, usar_copia_leve=usar_copia_leve)
+            av = avaliar_foto_para_molde(arq_c, tam_foto, molde, calib_tam, amp_max, metricas_base=m_base)
+            avaliacoes.append(av)
+        except Exception:
+            pass
+
+    if not avaliacoes:
+        return None
+
+    avaliacoes_ordenadas = _ordenar_avaliacoes_candidatas(avaliacoes)[:7]
+    campea = avaliacoes_ordenadas[0]
+    destino_padrao = cfg["fotos"] / nome_arquivo_destino_foto(nome_limpo, tam_foto)
+    escolhida_final = escolhida_anterior or (
+        str(fonte_original(Path(arquivo_atual), cfg)) if (arquivo_atual and Path(arquivo_atual).is_file()) else campea["caminho"]
+    )
+    if not any(_norm_caminho_rapido(c["caminho"]) == _norm_caminho_rapido(escolhida_final) for c in avaliacoes_ordenadas):
+        escolhida_final = campea["caminho"]
+
+    registro_op = {
+        "nome": nome_limpo,
+        "tamanho": tam_foto,
+        "subpasta": str(subpasta_conhecida) if subpasta_conhecida else "",
+        "arquivo_destino": str(arquivo_atual or destino_padrao),
+        "escolhida": escolhida_final,
+        "aviso_revisao": campea.get("aviso_revisao", "") if not campea.get("aprovada_qualidade", True) else "",
+        "candidatas": avaliacoes_ordenadas,
+    }
+
+    # Salva no opcoes_por_foto.json se veio de subpasta ou tem múltiplas opções
+    if subpasta_conhecida is not None or len(avaliacoes_ordenadas) >= 1:
+        chave_salvar = f"{ch_aluno}|{tam_foto}"
+        opcoes_todas[chave_salvar] = registro_op
+        gravar_opcoes_foto(opcoes_todas)
+        _salvar_cache_analise_subpastas()
+        _salvar_cache_rostos()
+
+    return registro_op
+
+
+def garantir_opcoes_foto_disponiveis(cfg, calib=None, alunos_atuais=None):
+    """
+    Garante que `opcoes_por_foto.json` contenha registros válidos para abrir a
+    'Tela: Escolher 1 entre as 7 Melhores' mesmo quando o usuário clicou apenas em
+    'Carregar Fotos da Pasta' ou colocou subpastas dentro de FOTO / subpastas_fotos_dir.
+    """
+    if calib is None:
+        calib = carregar_calibracao(cfg)
+
+    bruto_cfg = ler_config_bruto()
+    # 1) Se houver subpastas em subpastas_fotos_dir ou dentro de cfg["fotos"] ainda não processadas, processa
+    opcoes_atuais = ler_opcoes_foto()
+    opcoes_validas = {}
+    for k, v in opcoes_atuais.items():
+        if not isinstance(v, dict):
+            continue
+        cands = [
+            c for c in (v.get("candidatas") or [])
+            if isinstance(c, dict) and c.get("caminho") and Path(c["caminho"]).is_file()
+        ]
+        if cands:
+            v_copia = dict(v)
+            v_copia["candidatas"] = cands[:7]
+            opcoes_validas[k] = v_copia
+
+    if not opcoes_validas:
+        for pasta_cand in (bruto_cfg.get("subpastas_fotos_dir"), cfg.get("fotos")):
+            if pasta_cand and Path(pasta_cand).is_dir():
+                subs = _descobrir_subpastas_formandos(pasta_cand)
+                if subs:
+                    try:
+                        escolher_melhores_fotos_subpastas(
+                            pasta_cand,
+                            cfg,
+                            calib=calib,
+                            alunos_planos=alunos_atuais,
+                        )
+                        opcoes_validas = ler_opcoes_foto()
+                        if opcoes_validas:
+                            break
+                    except Exception:
+                        pass
+
+    # 2) Garante que os alunos atuais ou fotos da pasta FOTO também estejam presentes
+    fotos_pasta = listar_fotos(cfg["fotos"]) if cfg.get("fotos") and Path(cfg["fotos"]).is_dir() else []
+    for f in fotos_pasta:
+        nm = nome_do_aluno(f)
+        tm = tamanho_do_arquivo(f)
+        ch_op = f"{chave(nm)}|{tm}"
+        if ch_op not in opcoes_validas:
+            reg = obter_opcoes_aluno_inteligente(nm, tm, cfg, calib=calib, arquivo_atual=f)
+            if reg and reg.get("candidatas"):
+                opcoes_validas[ch_op] = reg
+
+    if opcoes_validas != opcoes_atuais and opcoes_validas:
+        gravar_opcoes_foto(opcoes_validas)
+    return opcoes_validas
+
+
 def trocar_foto_por_opcao(nome_aluno, tam, caminho_origem, cfg):
     """Substitui na pasta FOTO a foto do aluno pela candidata escolhida na tela das 7 melhores ou na Revisão."""
     origem = Path(caminho_origem)
     if not origem.is_file():
         raise FileNotFoundError("Foto candidata não encontrada: " + str(origem))
-    nome_dest = nome_arquivo_destino_foto(nome_aluno, tam)
+    tam_real = "30X20" if str(tam).upper() == "30X22" else str(tam).upper()
+    nome_dest = nome_arquivo_destino_foto(nome_aluno, tam_real)
     destino = cfg["fotos"] / nome_dest
     bkp = backup_de(destino, cfg)
     if bkp and bkp.is_file():
@@ -2483,20 +2814,21 @@ def trocar_foto_por_opcao(nome_aluno, tam, caminho_origem, cfg):
     apagar_manual(destino)
 
     opcoes = ler_opcoes_foto()
-    chave_op = f"{chave(nome_aluno)}|{tam}"
-    cand_match = None
-    if chave_op in opcoes:
-        opcoes[chave_op]["escolhida"] = str(origem)
-        cand_match = next(
-            (c for c in (opcoes[chave_op].get("candidatas") or []) if str(c.get("caminho")) == str(origem)),
-            None,
-        )
-        opcoes[chave_op]["aviso_revisao"] = (
-            (cand_match or {}).get("aviso_qualidade", "")
-            if cand_match and not cand_match.get("aprovada_qualidade")
-            else ""
-        )
-        gravar_opcoes_foto(opcoes)
+    for t_key in {tam_real, str(tam).upper()}:
+        chave_op = f"{chave(nome_aluno)}|{t_key}"
+        cand_match = None
+        if chave_op in opcoes:
+            opcoes[chave_op]["escolhida"] = str(origem)
+            cand_match = next(
+                (c for c in (opcoes[chave_op].get("candidatas") or []) if str(c.get("caminho")) == str(origem)),
+                None,
+            )
+            opcoes[chave_op]["aviso_revisao"] = (
+                (cand_match or {}).get("aviso_qualidade", "")
+                if cand_match and not cand_match.get("aprovada_qualidade")
+                else ""
+            )
+    gravar_opcoes_foto(opcoes)
 
     # Atualiza também o cache_analise_subpastas.json para lembrar a escolhida entre as 7 melhores
     try:
@@ -2504,34 +2836,54 @@ def trocar_foto_por_opcao(nome_aluno, tam, caminho_origem, cfg):
         subpastas_map = cache_an.get("_subpastas") or {}
         norm_sub = _norm_caminho_rapido(origem.parent)
         reg_sub = subpastas_map.get(norm_sub)
-        if isinstance(reg_sub, dict) and isinstance(reg_sub.get("escolhidas"), dict) and cand_match:
-            reg_sub["escolhidas"][tam] = dict(cand_match)
-            _salvar_cache_analise_subpastas()
+        if isinstance(reg_sub, dict) and isinstance(reg_sub.get("escolhidas"), dict):
+            cand_m = next(
+                (
+                    c for k_op, v_op in opcoes.items()
+                    if isinstance(v_op, dict)
+                    for c in (v_op.get("candidatas") or [])
+                    if str(c.get("caminho")) == str(origem)
+                ),
+                None,
+            )
+            if cand_m:
+                reg_sub["escolhidas"][tam_real] = dict(cand_m)
+                _salvar_cache_analise_subpastas()
     except Exception:
         pass
     return destino
 
 
-def obter_miniatura_candidata_rapida(caminho_foto, tam, cfg, calib=None, caixa_sugerida=None, lado_max=220, modo="recorte"):
+def obter_miniatura_candidata_rapida(
+    caminho_foto,
+    tam,
+    cfg,
+    calib=None,
+    caixa_sugerida=None,
+    lado_max=220,
+    modo="recorte",
+    tamanho_canvas=None,
+):
     """
     Carrega em ~2-5ms a miniatura de uma das 7 melhores fotos candidatas (usando `.cache_proxies_capaz`
-    quando disponível ou `abrir_foto_previa_rapida`) para exibir na Tela de Escolha entre as 7 Melhores:
+    via `_garantir_copia_leve_local` ou `abrir_foto_previa_rapida`) para exibir na Tela de Escolha e na Revisão:
       - `modo="recorte"`: retorna a foto já simulando o enquadramento no molde da capa (`20X20`, `30X20`, `24X34`).
       - `modo="inteira"`: retorna a foto inteira com o retângulo amarelo (`#FDE047`) do corte e linha azul dos olhos.
+      - `tamanho_canvas=(larg, alt)`: centraliza a miniatura em um canvas fixo `#23272f` para estabilidade no Tkinter.
     """
     caminho_p = Path(caminho_foto)
-    molde = cfg["moldes"].get(tam, MOLDES_PADRAO.get(tam, (3874, 3012)))
-    calib_tam = (calib or {}).get(tam, CALIBRACAO_PADRAO)
+    tam_molde = "30X20" if str(tam).upper() == "30X22" else str(tam).upper()
+    molde = cfg["moldes"].get(tam_molde, MOLDES_PADRAO.get(tam_molde, (3874, 3012)))
+    calib_tam = (calib or {}).get(tam_molde, CALIBRACAO_PADRAO)
 
     img_red = None
     tam_orig = None
     try:
         st = caminho_p.stat()
-        proxy_p = _obter_ou_criar_proxy_local(caminho_p, st.st_mtime_ns, st.st_size)
-        if proxy_p and Path(proxy_p).is_file():
-            with Image.open(proxy_p) as im_p:
-                img_red = im_p.convert("RGB")
-            tam_orig = tamanho_rapido(caminho_p)
+        bgr_p, tam_orig, _, _ = _garantir_copia_leve_local(caminho_p, mtime_ns=st.st_mtime_ns, fsize=st.st_size)
+        if bgr_p is not None and bgr_p.size > 0:
+            rgb_p = cv2.cvtColor(bgr_p, cv2.COLOR_BGR2RGB)
+            img_red = Image.fromarray(rgb_p)
     except Exception:
         img_red = None
 
@@ -2562,12 +2914,21 @@ def obter_miniatura_candidata_rapida(caminho_foto, tam, cfg, calib=None, caixa_s
         draw.rectangle((cl, ct, cr, cb), outline="#FDE047", width=max(2, round(vis.width / 110)))
         oy = int(round(ct + (cb - ct) * calib_tam.get("olhos_y", 0.38)))
         draw.line((cl, oy, cr, oy), fill="#38BDF8", width=max(1, round(vis.width / 160)))
-        vis.thumbnail((lado_max, lado_max), Image.BILINEAR)
-        return vis
+        resultado = vis
+    else:
+        resultado = img_red.crop((cl, ct, cr, cb))
 
-    rec = img_red.crop((cl, ct, cr, cb))
-    rec.thumbnail((lado_max, lado_max), Image.BILINEAR)
-    return rec
+    if tamanho_canvas and len(tamanho_canvas) == 2:
+        cw, ch = max(24, int(tamanho_canvas[0])), max(24, int(tamanho_canvas[1]))
+        resultado.thumbnail((cw - 4, ch - 4), Image.BILINEAR)
+        canvas = Image.new("RGB", (cw, ch), (35, 39, 47))
+        ox = (cw - resultado.width) // 2
+        oy = (ch - resultado.height) // 2
+        canvas.paste(resultado, (ox, oy))
+        return canvas
+
+    resultado.thumbnail((lado_max, lado_max), Image.BILINEAR)
+    return resultado
 
 
 def abrir_foto(caminho):
@@ -3126,21 +3487,88 @@ def ler_previa_capa(tam):
     return info, Image.open(b).convert("RGB"), Image.open(c).convert("RGBA")
 
 
-def montar_previa_capa(recortada, previa, nome=None, tamanho=None, ajuste=None):
+def montar_previa_capa(recortada, previa, nome=None, tamanho=None, ajuste=None, rapido=False):
     """Encaixa a foto já recortada no lugar da camada FOTO da capa reduzida."""
     info, baixo, cima = previa
     l, t, r, b = info["foto"]
-    capa = baixo.copy()
-    foto = recortada.convert("RGB").resize((max(1, round(r - l)), max(1, round(b - t))), Image.LANCZOS)
-    camada = Image.new("RGB", capa.size)
-    camada.paste(foto, (round(l), round(t)))
+    capa = baixo.copy().convert("RGBA")
+    filtro_redim = Image.BILINEAR if rapido else Image.LANCZOS
+    foto = recortada.convert("RGB").resize((max(1, round(r - l)), max(1, round(b - t))), filtro_redim)
     vl, vt, vr, vb = (round(v) for v in info["foto_visivel"])
-    mascara = Image.new("L", capa.size, 0)
-    ImageDraw.Draw(mascara).rectangle([vl, vt, vr - 1, vb - 1], fill=255)
-    capa.paste(camada, (0, 0), mascara)
-    capa.paste(cima, (0, 0), cima)
+    fl, ft = round(l), round(t)
+    cl0 = max(vl, fl)
+    ct0 = max(vt, ft)
+    cr0 = min(vr, fl + foto.width)
+    cb0 = min(vb, ft + foto.height)
+    if cr0 > cl0 and cb0 > ct0:
+        recorte_vis = foto.crop((cl0 - fl, ct0 - ft, cr0 - fl, cb0 - ft))
+        capa.paste(recorte_vis, (cl0, ct0))
+    capa.alpha_composite(cima.convert("RGBA"))
     if nome and tamanho:
         capa = desenhar_nome(capa, tamanho, nome, ajuste)
+    return capa.convert("RGB")
+
+
+def montar_previa_sintetica(recortada, tamanho, nome=None, curso="", cor=None, ajuste=None):
+    """
+    Gera uma prévia sintética rápida e elegante da capa quando o PSD base ainda não foi gerado.
+    Garante que a aba Revisão e Recorte sempre mostre a capa do aluno com foto, cor do curso e nome.
+    """
+    tam = str(tamanho or "24X34").upper()
+    if tam == "20X20":
+        w, h = 920, 620
+        box = (470, 55, 865, 450)
+        area_nome = (470, 465, 865, 585)
+    elif tam == "30X20":
+        w, h = 980, 560
+        box = (520, 42, 930, 395)
+        area_nome = (520, 410, 930, 530)
+    elif tam == "30X22":
+        w, h = 980, 600
+        box = (510, 45, 930, 420)
+        area_nome = (510, 435, 930, 565)
+    else:
+        w, h = 760, 940
+        box = (155, 110, 605, 650)
+        area_nome = (90, 685, 670, 880)
+
+    rgb_fundo = tuple(int(c) for c in cor) if (isinstance(cor, (list, tuple)) and len(cor) == 3) else (24, 34, 56)
+    capa = Image.new("RGB", (w, h), rgb_fundo)
+    draw = ImageDraw.Draw(capa)
+
+    # Moldura dourada sutil e lombada simulada
+    tom_escuro = tuple(max(0, c - 18) for c in rgb_fundo)
+    if tam in ("20X20", "30X20", "30X22"):
+        meio_x = w // 2 - 20
+        draw.rectangle([0, 0, meio_x, h], fill=tom_escuro)
+        draw.line([(meio_x, 0), (meio_x, h)], fill=(212, 175, 95), width=2)
+    draw.rectangle([16, 16, w - 17, h - 17], outline=(212, 175, 95), width=2)
+
+    # Foto recortada encaixada
+    l, t, r, b = box
+    fw, fh = max(1, r - l), max(1, b - t)
+    foto_redim = recortada.convert("RGB").resize((fw, fh), Image.BILINEAR)
+    capa.paste(foto_redim, (l, t))
+    draw.rectangle([l - 2, t - 2, r + 1, b + 1], outline=(212, 175, 95), width=2)
+
+    # Curso e formato no topo
+    fonte_topo = _fonte_pil(None, 16)
+    rotulo_topo = f"{tam}  •  {curso}" if curso else tam
+    draw.text((32, 28), rotulo_topo, fill=(212, 175, 95), font=fonte_topo)
+
+    # Nome do aluno em 2 linhas com corte inteligente
+    if nome:
+        layout = calcular_layout_nome(tam, nome, ajuste)
+        nl1 = layout.get("linha1", "").upper()
+        nl2 = layout.get("linha2", "").upper()
+        nx0, ny0, nx1, ny1 = area_nome
+        cx = (nx0 + nx1) // 2
+        f1 = _fonte_pil(None, max(16, round(28 * layout.get("escala1", 100) / 100.0)))
+        f2 = _fonte_pil(None, max(14, round(24 * layout.get("escala2", 100) / 100.0)))
+        if nl1:
+            draw.text((cx, ny0 + 28), nl1, fill=(232, 198, 116), font=f1, anchor="mm")
+        if nl2:
+            draw.text((cx, ny0 + 70), nl2, fill=(212, 175, 95), font=f2, anchor="mm")
     return capa
 
 
@@ -3557,7 +3985,7 @@ def gerar_presets_curso(tamanho, cursos_rgb):
     return resultado
 
 
-def montar_previa_preset(recortada, preset, nome=None, ajuste=None):
+def montar_previa_preset(recortada, preset, nome=None, ajuste=None, rapido=False):
     """Insere o recorte do aluno no preset do curso, preservando a ordem das layers.
 
     Com nome, desenha o nome do aluno como o Photoshop (ajuste None = o salvo em ajustes_nome.json).
@@ -3565,23 +3993,32 @@ def montar_previa_preset(recortada, preset, nome=None, ajuste=None):
 
     capa = preset["baixo"].copy().convert("RGBA")
     l, t, r, b = preset["foto"]
+    filtro_redim = Image.BILINEAR if rapido else Image.LANCZOS
     foto = recortada.convert("RGB").resize(
-        (max(1, round(r - l)), max(1, round(b - t))), Image.LANCZOS,
+        (max(1, round(r - l)), max(1, round(b - t))), filtro_redim,
     )
-    camada_foto = Image.new("RGBA", capa.size, (0, 0, 0, 0))
-    camada_foto.paste(foto, (round(l), round(t)))
     vl, vt, vr, vb = (round(valor) for valor in preset["foto_visivel"])
-    mascara = Image.new("L", capa.size, 0)
-    ImageDraw.Draw(mascara).rectangle((vl, vt, vr - 1, vb - 1), fill=255)
-    capa.paste(camada_foto, (0, 0), mascara)
+    fl, ft = round(l), round(t)
+    cl0 = max(vl, fl)
+    ct0 = max(vt, ft)
+    cr0 = min(vr, fl + foto.width)
+    cb0 = min(vb, ft + foto.height)
+    if cr0 > cl0 and cb0 > ct0:
+        recorte_vis = foto.crop((cl0 - fl, ct0 - ft, cr0 - fl, cb0 - ft))
+        capa.paste(recorte_vis, (cl0, ct0))
 
-    camadas = (preset["meio"], preset["frente"], preset["cima"])
-    if not preset["frente_depois_foto"]:
-        camadas = (preset["frente"], preset["meio"], preset["cima"])
-    else:
-        camadas = (preset["meio"], preset["cima"], preset["frente"])
-    for imagem in camadas:
-        capa.alpha_composite(imagem.convert("RGBA"))
+    sobre = preset.get("_sobre_foto")
+    if sobre is None:
+        sobre = Image.new("RGBA", capa.size, (0, 0, 0, 0))
+        if not preset["frente_depois_foto"]:
+            camadas = (preset["frente"], preset["meio"], preset["cima"])
+        else:
+            camadas = (preset["meio"], preset["cima"], preset["frente"])
+        for imagem in camadas:
+            sobre.alpha_composite(imagem.convert("RGBA"))
+        preset["_sobre_foto"] = sobre
+    capa.alpha_composite(sobre)
+
     if nome:
         capa = desenhar_nome(capa, preset["tamanho"], nome, ajuste)
 
@@ -3673,17 +4110,15 @@ def _arquivo_fonte(nome_ps):
     """Arquivo .ttf/.otf instalado para o nome PostScript usado no PSD."""
     global _FONTES_POR_CHAVE
     alvo = _chave_fonte(nome_ps)
-    pastas = [
-        Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts",
-    ]
-    arquivos = [a for p in pastas if p.is_dir() for a in p.iterdir() if a.suffix.lower() in (".ttf", ".otf")]
-    for arquivo in arquivos:
-        if _chave_fonte(arquivo.stem) == alvo:
-            return str(arquivo)
     if _FONTES_POR_CHAVE is None:
         _FONTES_POR_CHAVE = {}
+        pastas = [
+            Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts",
+        ]
+        arquivos = [a for p in pastas if p.is_dir() for a in p.iterdir() if a.suffix.lower() in (".ttf", ".otf")]
         for arquivo in arquivos:
+            _FONTES_POR_CHAVE.setdefault(_chave_fonte(arquivo.stem), str(arquivo))
             try:
                 familia, estilo = ImageFont.truetype(str(arquivo), 10).getname()
             except Exception:
@@ -3989,6 +4424,21 @@ def calcular_layout_nome(tamanho, nome, ajuste=None, modelo=None):
     return layout
 
 
+@functools.lru_cache(maxsize=256)
+def _imagem_texto_cached(fonte_arq, tracking_val, escala_h, escala_v, alinhamento, sombra, cores_tupla, rotacao_val, texto, px_round):
+    medida = {
+        "fonte": fonte_arq,
+        "tracking": tracking_val,
+        "escala_h": escala_h,
+        "escala_v": escala_v,
+        "alinhamento": alinhamento,
+        "sombra": sombra,
+        "cores": [list(c) for c in cores_tupla],
+    }
+    img, orig = _imagem_texto(medida, texto, px_round)
+    return _girar_texto(img, orig, rotacao_val)
+
+
 def _imagem_texto(medida, texto, px):
     """Texto renderizado em RGBA e o ponto de âncora (como no Photoshop) dentro da imagem."""
     fonte = _fonte_pil(medida.get("fonte"), round(px, 2))
@@ -4078,23 +4528,45 @@ def desenhar_nome(capa, tamanho, nome, ajuste=None):
         (modelo["linhas"][0], layout["linha1"], layout["escala1"]),
         (modelo["linhas"][1], layout["linha2"], layout["escala2"]),
     ]
-    recorte = None
+    caixa_recorte = None
     if modelo.get("recorte"):
-        l, t, r, b = (round(v * escala) for v in modelo["recorte"])
-        recorte = Image.new("L", resultado.size, 0)
-        ImageDraw.Draw(recorte).rectangle((l, t, r - 1, b - 1), fill=255)
+        caixa_recorte = tuple(round(v * escala) for v in modelo["recorte"])
     if modelo.get("lombada"):
         itens.append((modelo["lombada"], " ".join(palavras_nome(nome)), layout["escala_lombada"]))
     for medida, texto, escala_linha in itens:
         if not texto:
             continue
-        imagem, origem = _imagem_texto(medida, _texto_da_linha(medida, texto), medida["px"] * escala * escala_linha / 100)
-        imagem, origem = _girar_texto(imagem, origem, medida["rotacao"])
-        camada = Image.new("RGBA", resultado.size, (0, 0, 0, 0))
-        camada.paste(imagem, (round(medida["x"] * escala - origem[0]), round(medida["y"] * escala - origem[1])))
-        if recorte is not None and medida is not modelo.get("lombada"):
-            camada.putalpha(ImageChops.multiply(camada.getchannel("A"), recorte))
-        resultado.alpha_composite(camada)
+        cores_tupla = tuple(tuple(c) for c in (medida.get("cores") or [[212, 175, 95]]))
+        px_round = round(medida["px"] * escala * escala_linha / 100, 2)
+        imagem, origem = _imagem_texto_cached(
+            medida.get("fonte"),
+            float(medida.get("tracking", 0)),
+            float(medida.get("escala_h", 1.0)),
+            float(medida.get("escala_v", 1.0)),
+            medida.get("alinhamento", "esquerda"),
+            bool(medida.get("sombra")),
+            cores_tupla,
+            float(medida.get("rotacao", 0.0)),
+            _texto_da_linha(medida, texto),
+            px_round,
+        )
+        dx = round(medida["x"] * escala - origem[0])
+        dy = round(medida["y"] * escala - origem[1])
+        img_comp = imagem
+        if caixa_recorte is not None and medida is not modelo.get("lombada"):
+            rl, rt, rr, rb = caixa_recorte
+            ix0 = max(0, rl - dx, -dx)
+            iy0 = max(0, rt - dy, -dy)
+            ix1 = min(img_comp.width, rr - dx, resultado.width - dx)
+            iy1 = min(img_comp.height, rb - dy, resultado.height - dy)
+        else:
+            ix0 = max(0, -dx)
+            iy0 = max(0, -dy)
+            ix1 = min(img_comp.width, resultado.width - dx)
+            iy1 = min(img_comp.height, resultado.height - dy)
+        if ix1 > ix0 and iy1 > iy0:
+            sub = img_comp.crop((ix0, iy0, ix1, iy1))
+            resultado.alpha_composite(sub, dest=(dx + ix0, dy + iy0))
     return resultado if modo == "RGBA" else resultado.convert(modo)
 
 
