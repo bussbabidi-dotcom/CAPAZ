@@ -1421,9 +1421,48 @@ def encontrar_cabecalho(ws, padrao=True):
     )
 
 
+RE_EXTENSAO_IMAGEM = re.compile(r"(?i)\.(?:jpe?g|png|tiff?|psd)$")
+RE_TOKEN_TAMANHO = re.compile(
+    r"(?i)[\(\[\{\s_\-\.]*"
+    r"(?<!\d)(?:20\s*[x×*]\s*20|24\s*[x×*]\s*34|34\s*[x×*]\s*24|30\s*[x×*]\s*20|20\s*[x×*]\s*30|30\s*[x×*]\s*22)(?:\s*cm)?"
+    r"(?:\s*\(\d+\))?"
+    r"[\)\]\}\s_\-\.]*(?!\d)"
+)
+
+PLANO_PADRAO_POR_TAMANHO = {
+    "24X34": "STUDIO DAY BERLIM 24X34",
+    "20X20": "ESSENCIAL BOOK 20X20",
+    "30X22": "PRIME BOOK 30X22",
+    "30X20": "PRIME BOOK 30X20",
+}
+
+
+def extrair_tamanho_do_texto(texto):
+    """Detecta se o texto/nome contém indicação explícita de tamanho (24X34, 20X20, 30X20, 30X22)."""
+    compacto = re.sub(r"[\s_\-\.]+", "", str(texto or "").upper()).replace("×", "X").replace("*", "X")
+    if "24X34" in compacto or "34X24" in compacto:
+        return "24X34"
+    if "20X20" in compacto:
+        return "20X20"
+    if "30X22" in compacto:
+        return "30X22"
+    if "30X20" in compacto or "20X30" in compacto:
+        return "30X20"
+    return None
+
+
+def limpar_tamanho_do_nome(nome):
+    """Remove qualquer sufixo/token de tamanho (ex.: 24X34, 34X24, 20X20, 30X20, 30X22) e extensão do nome do aluno."""
+    texto = str(nome or "").strip()
+    texto = RE_EXTENSAO_IMAGEM.sub("", texto)
+    texto = RE_TOKEN_TAMANHO.sub(" ", texto)
+    texto = re.sub(r"[_\-]+", " ", texto)
+    return re.sub(r"\s+", " ", texto).strip()
+
+
 def formatar_nome(nome):
-    """Só a primeira letra de cada palavra maiúscula: "MARIA DA SILVA" -> "Maria Da Silva"."""
-    texto = re.sub(r"\s+", " ", str(nome or "")).strip()
+    """Só a primeira letra de cada palavra maiúscula e sem o tamanho (24X34 / 20X20 / 30X20): "MARIA DA SILVA 24X34" -> "Maria Da Silva"."""
+    texto = limpar_tamanho_do_nome(nome)
     return re.sub(r"[^\W\d_]+", lambda m: m.group(0)[0].upper() + m.group(0)[1:].lower(), texto)
 
 
@@ -1478,12 +1517,14 @@ def ler_planilha(caminho=None):
         ws.max_row + 1
     ):
 
-        nome = formatar_nome(normalizar(
+        bruto_nome = normalizar(
             ws.cell(
                 linha,
                 colunas["nome"]
             ).value
-        ))
+        )
+        tam_no_nome = extrair_tamanho_do_texto(bruto_nome)
+        nome = formatar_nome(bruto_nome)
 
         curso = ""
 
@@ -1502,6 +1543,8 @@ def ler_planilha(caminho=None):
                 colunas["plano"]
             ).value
         )
+        if not plano and tam_no_nome:
+            plano = PLANO_PADRAO_POR_TAMANHO.get(tam_no_nome, "")
 
         if not nome:
             continue
@@ -2246,7 +2289,7 @@ def criar_job_berlim_24(
         modelo_nome
     ]
 
-    nome = registro["nome"]
+    nome = formatar_nome(registro["nome"])
 
     psd = (
         PSD_DIR /
@@ -2356,7 +2399,7 @@ def criar_job_essencial_20(
     registro
 ):
 
-    nome = registro["nome"]
+    nome = formatar_nome(registro["nome"])
 
     modelo = MODELO_ESSENCIAL_20
 
@@ -2470,7 +2513,7 @@ def criar_job_30(
     modelo
 ):
 
-    nome = registro["nome"]
+    nome = formatar_nome(registro["nome"])
 
     psd = (
         PSD_DIR /
@@ -2580,7 +2623,7 @@ def criar_job_30x22(
     modelo = MODELOS["PRIME BOOK 30X22"]
     config = modelo["frente" if lado == "FRENTE" else "verso"]
 
-    nome = registro["nome"]
+    nome = formatar_nome(registro["nome"])
 
     psd = PSD_DIR / config["psd"]
 
@@ -4258,10 +4301,20 @@ function contarNomes(lista, inicio, fim) {
 }
 
 
+function limparTamanhoDoNomeJSX(texto) {
+    if (!texto) {
+        return "";
+    }
+    var limpo = String(texto).replace(/\.(?:jpe?g|png|tiff?|psd)$/i, "");
+    limpo = limpo.replace(/[\(\[\{\s_\-\.]*(?:20\s*[xX×\*]\s*20|24\s*[xX×\*]\s*34|34\s*[xX×\*]\s*24|30\s*[xX×\*]\s*20|20\s*[xX×\*]\s*30|30\s*[xX×\*]\s*22)(?:\s*cm)?(?:\s*\(\d+\))?[\)\]\}\s_\-\.]*/gi, " ");
+    return normalizar(limpo);
+}
+
+
 function dividirNomeDuasLinhas(nomeCompleto) {
 
     var bruto =
-        normalizar(nomeCompleto).split(" ");
+        limparTamanhoDoNomeJSX(nomeCompleto).split(" ");
 
     var palavras = [];
 
@@ -5617,7 +5670,7 @@ function alterarTexto(
 
 
     camada.textItem.contents =
-        texto;
+        limparTamanhoDoNomeJSX(texto);
 }
 
 

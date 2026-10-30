@@ -328,12 +328,44 @@ def chave(texto):
     return re.sub(r"\s+", " ", texto).strip().casefold()
 
 
+RE_EXTENSAO_IMAGEM = re.compile(r"(?i)\.(?:jpe?g|png|tiff?|psd)$")
+RE_TOKEN_TAMANHO = re.compile(
+    r"(?i)[\(\[\{\s_\-\.]*"
+    r"(?<!\d)(?:20\s*[x×*]\s*20|24\s*[x×*]\s*34|34\s*[x×*]\s*24|30\s*[x×*]\s*20|20\s*[x×*]\s*30|30\s*[x×*]\s*22)(?:\s*cm)?"
+    r"(?:\s*\(\d+\))?"
+    r"[\)\]\}\s_\-\.]*(?!\d)"
+)
+
+
+def extrair_tamanho_do_texto(texto):
+    """Detecta se o texto/nome contém indicação explícita de tamanho (24X34, 20X20, 30X20, 30X22)."""
+    compacto = re.sub(r"[\s_\-\.]+", "", str(texto or "").upper()).replace("×", "X").replace("*", "X")
+    if "24X34" in compacto or "34X24" in compacto:
+        return "24X34"
+    if "20X20" in compacto:
+        return "20X20"
+    if "30X22" in compacto:
+        return "30X22"
+    if "30X20" in compacto or "20X30" in compacto:
+        return "30X20"
+    return None
+
+
+def limpar_tamanho_do_nome(nome):
+    """Remove qualquer sufixo/token de tamanho (ex.: 24X34, 34X24, 20X20, 30X20, 30X22) e extensão do nome do aluno."""
+    texto = str(nome or "").strip()
+    texto = RE_EXTENSAO_IMAGEM.sub("", texto)
+    texto = RE_TOKEN_TAMANHO.sub(" ", texto)
+    texto = re.sub(r"[_\-]+", " ", texto)
+    return re.sub(r"\s+", " ", texto).strip()
+
+
 def tamanho_do_arquivo(caminho):
     """20X20 / 24X34 pelo sufixo; sem sufixo é a foto do 30X20."""
-    nome = caminho.stem.upper().replace(" ", "")
-    for tam in ("20X20", "24X34", "30X20"):
-        if tam in nome:
-            return tam
+    stem = caminho.stem if hasattr(caminho, "stem") else Path(str(caminho)).stem
+    achado = extrair_tamanho_do_texto(stem)
+    if achado in ("20X20", "24X34", "30X20"):
+        return achado
     return "30X20"
 
 
@@ -341,20 +373,20 @@ PLANO_POR_TAMANHO = {
     "30X20": "Prime Book 30X20",
     "20X20": "Essencial Book 20x20",
     "24X34": "Studio Day Berlim 24x34",
+    "30X22": "Prime Book 30X22",
 }
 
 
 def formatar_nome(nome):
-    """Só a primeira letra de cada palavra maiúscula: "MARIA DA SILVA" -> "Maria Da Silva"."""
-    texto = re.sub(r"\s+", " ", str(nome or "")).strip()
+    """Só a primeira letra de cada palavra maiúscula e sem o tamanho (24X34 / 20X20 / 30X20): "MARIA DA SILVA 24X34" -> "Maria Da Silva"."""
+    texto = limpar_tamanho_do_nome(nome)
     return re.sub(r"[^\W\d_]+", lambda m: m.group(0)[0].upper() + m.group(0)[1:].lower(), texto)
 
 
 def nome_do_aluno(caminho):
-    """Nome do aluno a partir do arquivo, sem o tamanho (20X20 / 24X34 / 30X20)."""
-    nome = re.sub(r"(?i)(?<![0-9a-z])(20|24|30)\s*x\s*(20|34)(?![0-9])", " ", caminho.stem)
-    nome = re.sub(r"[_\-]+", " ", nome)
-    return formatar_nome(nome)
+    """Nome do aluno a partir do arquivo ou pasta, sempre sem o tamanho (20X20 / 24X34 / 30X20 / 34X24)."""
+    stem = caminho.stem if hasattr(caminho, "stem") else Path(str(caminho)).stem
+    return formatar_nome(stem)
 
 
 def _cursos_salvos_por_foto():
@@ -807,7 +839,7 @@ def gravar_opcoes_foto(dados):
 
 
 def nome_arquivo_destino_foto(nome_aluno, tam):
-    """Nome padrão na pasta FOTO compatível com AUTOMAÇAO-PASTA.py e recortar_fotos.py."""
+    """Nome padrão na pasta FOTO compatível com AUTOMAÇAO-PASTA.py e recortar_fotos.py (nunca duplica o tamanho no nome)."""
     limpo = formatar_nome(nome_aluno)
     if str(tam).upper() in ("20X20", "24X34"):
         return f"{limpo} {str(tam).upper()}.jpg"
@@ -2264,9 +2296,12 @@ def escolher_melhores_fotos_subpastas(
 
     tarefas = []
     for idx_sub, sub in enumerate(subpastas, 1):
-        nome_aluno = formatar_nome(sub.name) if sub != pasta_mae else formatar_nome(pasta_mae.name)
+        bruto_pasta = sub.name if sub != pasta_mae else pasta_mae.name
+        tam_na_pasta = extrair_tamanho_do_texto(bruto_pasta)
+        nome_aluno = formatar_nome(bruto_pasta)
         ch_aluno = chave(nome_aluno)
-        plano_aluno = mapa_planos.get(ch_aluno) or plano_padrao
+        plano_inferido_pasta = PLANO_POR_TAMANHO.get(tam_na_pasta) if tam_na_pasta else None
+        plano_aluno = mapa_planos.get(ch_aluno) or plano_inferido_pasta or plano_padrao
         curso_aluno = mapa_cursos.get(ch_aluno) or cursos_salvos_nome.get(ch_aluno) or curso_padrao
         tamanhos_necessarios = tamanhos_do_plano(plano_aluno, berlim_modo)
         tarefas.append({
@@ -3811,7 +3846,8 @@ def modelo_nome(tamanho):
 
 
 def palavras_nome(nome):
-    return [p for p in re.sub(r"\s+", " ", str(nome or "")).strip().split(" ") if p]
+    limpo = limpar_tamanho_do_nome(nome)
+    return [p for p in re.sub(r"\s+", " ", limpo).strip().split(" ") if p]
 
 
 def _eh_preposicao(palavra):

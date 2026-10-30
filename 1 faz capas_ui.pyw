@@ -168,9 +168,48 @@ def _detectar_cabecalho(celulas):
     return None
 
 
+RE_EXTENSAO_IMAGEM = re.compile(r"(?i)\.(?:jpe?g|png|tiff?|psd)$")
+RE_TOKEN_TAMANHO = re.compile(
+    r"(?i)[\(\[\{\s_\-\.]*"
+    r"(?<!\d)(?:20\s*[x×*]\s*20|24\s*[x×*]\s*34|34\s*[x×*]\s*24|30\s*[x×*]\s*20|20\s*[x×*]\s*30|30\s*[x×*]\s*22)(?:\s*cm)?"
+    r"(?:\s*\(\d+\))?"
+    r"[\)\]\}\s_\-\.]*(?!\d)"
+)
+
+PLANO_PADRAO_POR_TAMANHO = {
+    "24X34": "Studio Day Berlim 24x34",
+    "20X20": "Essencial Book 20x20",
+    "30X22": "Prime Book 30X22",
+    "30X20": "Prime Book 30X20",
+}
+
+
+def extrair_tamanho_do_texto(texto):
+    """Detecta se o texto/nome contém indicação explícita de tamanho (24X34, 20X20, 30X20, 30X22)."""
+    compacto = re.sub(r"[\s_\-\.]+", "", str(texto or "").upper()).replace("×", "X").replace("*", "X")
+    if "24X34" in compacto or "34X24" in compacto:
+        return "24X34"
+    if "20X20" in compacto:
+        return "20X20"
+    if "30X22" in compacto:
+        return "30X22"
+    if "30X20" in compacto or "20X30" in compacto:
+        return "30X20"
+    return None
+
+
+def limpar_tamanho_do_nome(nome):
+    """Remove qualquer sufixo/token de tamanho (ex.: 24X34, 34X24, 20X20, 30X20, 30X22) e extensão do nome do aluno."""
+    texto = str(nome or "").strip()
+    texto = RE_EXTENSAO_IMAGEM.sub("", texto)
+    texto = RE_TOKEN_TAMANHO.sub(" ", texto)
+    texto = re.sub(r"[_\-]+", " ", texto)
+    return re.sub(r"\s+", " ", texto).strip()
+
+
 def formatar_nome(nome):
-    """Só a primeira letra de cada palavra maiúscula: "MARIA DA SILVA" -> "Maria Da Silva"."""
-    texto = re.sub(r"\s+", " ", str(nome or "")).strip()
+    """Só a primeira letra de cada palavra maiúscula e sem o tamanho (24X34 / 20X20 / 30X20): "MARIA DA SILVA 24X34" -> "Maria Da Silva"."""
+    texto = limpar_tamanho_do_nome(nome)
     return re.sub(r"[^\W\d_]+", lambda m: m.group(0)[0].upper() + m.group(0)[1:].lower(), texto)
 
 
@@ -180,6 +219,7 @@ def interpretar_colagem(texto):
 
     Cada aluno: {"linha": n, "nome": ..., "curso": ..., "plano": ...}
     "linha" é o número que o script vai usar (cabeçalho na 1, alunos a partir da 2).
+    Se o tamanho (ex.: 24X34) estiver junto do nome, remove-o do nome e preenche o plano se estiver vazio.
     """
 
     linhas = [
@@ -210,12 +250,18 @@ def interpretar_colagem(texto):
     for numero, linha in enumerate(linhas, start=2):
 
         celulas = linha.split("\t")
+        bruto_nome = pegar(celulas, "nome")
+        tam_no_nome = extrair_tamanho_do_texto(bruto_nome)
+        nome_limpo = formatar_nome(bruto_nome)
+        plano_lido = pegar(celulas, "plano")
+        if not plano_lido and tam_no_nome:
+            plano_lido = PLANO_PADRAO_POR_TAMANHO.get(tam_no_nome, "")
 
         alunos.append({
             "linha": numero,
-            "nome": formatar_nome(pegar(celulas, "nome")),
+            "nome": nome_limpo,
             "curso": pegar(celulas, "curso"),
-            "plano": pegar(celulas, "plano"),
+            "plano": plano_lido,
         })
 
     return alunos
@@ -811,7 +857,7 @@ class JanelaCapas:
 
         colagem = ttk.LabelFrame(
             principal,
-            text="Lista de Capas (duplo-clique em um aluno para abrir na Revisão e Recorte)",
+            text="Lista de Capas (duplo-clique em Curso/Plano p/ editar direto, ou no Nome p/ abrir na Revisão)",
             padding=6,
         )
         colagem.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
@@ -826,9 +872,9 @@ class JanelaCapas:
         self.tabela = ttk.Treeview(colagem, columns=colunas, show="headings", height=12)
         for col, titulo, largura in (
             ("linha", "#", 46),
-            ("nome", "Nome do Formando", 280),
-            ("curso", "Curso (definido na prévia ou lista)", 220),
-            ("plano", "Plano / Tamanho da Capa", 200),
+            ("nome", "Nome do Formando (duplo-clique -> Revisão)", 280),
+            ("curso", "Curso (duplo-clique p/ editar)", 220),
+            ("plano", "Plano / Tamanho (duplo-clique p/ editar)", 200),
         ):
             self.tabela.heading(col, text=titulo)
             self.tabela.column(col, width=largura, anchor="w", stretch=(col != "linha"))
@@ -1012,15 +1058,89 @@ class JanelaCapas:
             self.texto_colagem.grid_forget()
 
     def _duplo_clique_tabela(self, evento=None):
-        sel = self.tabela.selection()
-        if not sel:
+        iid = self.tabela.identify_row(evento.y) if evento else None
+        col_id = self.tabela.identify_column(evento.x) if evento else None
+        if not iid:
+            sel = self.tabela.selection()
+            if not sel:
+                return
+            iid = sel[0]
+        valores = self.tabela.item(iid, "values")
+        if len(valores) < 4:
             return
-        valores = self.tabela.item(sel[0], "values")
-        if len(valores) >= 2:
-            nome_aluno = valores[1]
-            self.abas.select(self.quadro_revisao)
-            if hasattr(self, "aba_fotos"):
-                self.aba_fotos.selecionar_aluno_por_nome(nome_aluno)
+        nome_aluno = valores[1]
+
+        # Se clicou nas colunas Curso (#3) ou Plano (#4), abre Combobox inline na célula
+        if col_id in ("#3", "#4") and self.origem.get() != "arquivo" and evento is not None:
+            caixa_celula = self.tabela.bbox(iid, col_id)
+            if caixa_celula:
+                x, y, larg, alt = caixa_celula
+                eh_curso = col_id == "#3"
+                try:
+                    automacao = modulo_automacao()
+                    opcoes = (
+                        sorted(automacao.CURSOS.keys())
+                        if eh_curso
+                        else sorted(set(automacao.MODELOS) | {"ESSENCIAL BOOK 20X20"})
+                    )
+                except Exception:
+                    opcoes = (
+                        []
+                        if eh_curso
+                        else ["Prime Book 30X20", "Essencial Book 20x20", "Studio Day Berlim 24x34", "Prime Book 30X22"]
+                    )
+                atual = valores[2] if eh_curso else valores[3]
+                if atual == "(definir na Revisão)":
+                    atual = ""
+                var_ed = self.tk.StringVar(value=atual)
+                combo_ed = self.ttk.Combobox(self.tabela, textvariable=var_ed, values=opcoes)
+                combo_ed.place(x=x, y=y, width=max(140, larg), height=max(24, alt))
+                combo_ed.focus_set()
+
+                def _confirmar_edicao(ev=None):
+                    novo_val = var_ed.get().strip()
+                    try:
+                        combo_ed.destroy()
+                    except Exception:
+                        pass
+                    if not novo_val:
+                        return
+                    alunos = interpretar_colagem(self.texto_colagem.get("1.0", "end"))
+                    alvo_ch = chave(nome_aluno)
+                    for a in alunos:
+                        if chave(a.get("nome", "")) == alvo_ch:
+                            if eh_curso:
+                                a["curso"] = novo_val
+                            else:
+                                a["plano"] = novo_val
+                    if eh_curso and hasattr(self, "aba_fotos") and self.aba_fotos.fotos:
+                        rf = modulo_recorte()
+                        for f in self.aba_fotos.fotos:
+                            if chave(rf.nome_do_aluno(f)) == alvo_ch:
+                                self.aba_fotos.cursos_manuais[chave_caminho_foto(f)] = novo_val
+                        try:
+                            self.aba_fotos._gravar_cursos_foto()
+                        except Exception:
+                            pass
+                    self._preencher_texto(alunos)
+                    try:
+                        PASTA_TEMP.mkdir(parents=True, exist_ok=True)
+                        ULTIMA_COLAGEM.write_text(self.texto_colagem.get("1.0", "end"), encoding="utf-8")
+                    except Exception:
+                        pass
+                    self.status.set(
+                        f"{'Curso' if eh_curso else 'Plano'} de {nome_aluno} atualizado para: {novo_val}"
+                    )
+
+                combo_ed.bind("<<ComboboxSelected>>", _confirmar_edicao)
+                combo_ed.bind("<Return>", _confirmar_edicao)
+                combo_ed.bind("<Escape>", lambda e: combo_ed.destroy())
+                combo_ed.bind("<FocusOut>", lambda e: self.root.after(120, lambda: combo_ed.destroy() if combo_ed.winfo_exists() else None))
+                return
+
+        self.abas.select(self.quadro_revisao)
+        if hasattr(self, "aba_fotos"):
+            self.aba_fotos.selecionar_aluno_por_nome(nome_aluno)
 
     def _aba_principal_mudou(self, evento=None):
 
@@ -3113,7 +3233,7 @@ class AbaFotos:
                 entradas = []
                 caminhos_vistos = set()
                 for registro in registros:
-                    nome = str(registro.get("nome") or "").strip()
+                    nome = formatar_nome(registro.get("nome") or "")
                     if not nome:
                         continue
                     _, modelo = automacao.encontrar_modelo(registro.get("plano", ""))
