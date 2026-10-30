@@ -824,19 +824,113 @@ class JanelaCapas:
         self.quadro_revisao = quadro_revisao
         abas.bind("<<NotebookTabChanged>>", self._aba_principal_mudou)
 
-        quadro_pastas = ttk.Frame(abas, padding=16)
-        abas.add(quadro_pastas, text="Pastas e links")
+        quadro_config = ttk.Frame(abas, padding=14)
+        abas.add(quadro_config, text="Configuração")
+        self.quadro_config = quadro_config
+        quadro_config.columnconfigure(0, weight=1)
+        quadro_config.columnconfigure(1, weight=1)
+        quadro_config.rowconfigure(1, weight=1)
+
+        # ---------------- Grade de Topo na Aba Configuração: Sistema vs Automação/Atalhos ----------------
+        painel_sistema = ttk.LabelFrame(
+            quadro_config, text="Preferências de Sistema & Limite de Hardware", padding=8
+        )
+        painel_sistema.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 8))
+
+        linha_sys_1 = ttk.Frame(painel_sistema)
+        linha_sys_1.pack(fill="x")
+        ttk.Label(linha_sys_1, text="Limite de Hardware (CPU):").pack(side="left", padx=(0, 4))
+        self.escala_hardware = ttk.Scale(
+            linha_sys_1,
+            from_=25,
+            to=85,
+            variable=self.limite_cpu_pct,
+            orient="horizontal",
+            length=135,
+            command=lambda _v: self._atualizar_resumo_hardware(salvar=False),
+        )
+        self.escala_hardware.pack(side="left", padx=(0, 6))
+        self.escala_hardware.bind("<ButtonRelease-1>", lambda e: self._atualizar_resumo_hardware(salvar=True))
+
+        self.combo_preset_hardware = ttk.Combobox(
+            linha_sys_1,
+            textvariable=self.preset_hardware,
+            state="readonly",
+            width=19,
+            values=(
+                "30% (Leve)",
+                "50% (Metade livre)",
+                "60% (Equilibrado)",
+                "75% (Rápido)",
+                "85% (Turbo controlado)",
+            ),
+        )
+        self.combo_preset_hardware.pack(side="left", padx=(0, 8))
+        self.combo_preset_hardware.bind("<<ComboboxSelected>>", self._escolheu_preset_hardware)
+
+        ttk.Checkbutton(
+            linha_sys_1,
+            text="Impulsionar c/ GPU (OpenCL)",
+            variable=self.usar_gpu_opencl,
+            command=lambda: self._atualizar_resumo_hardware(salvar=True),
+        ).pack(side="left")
+
+        linha_sys_2 = ttk.Frame(painel_sistema)
+        linha_sys_2.pack(fill="x", pady=(6, 0))
+        ttk.Checkbutton(
+            linha_sys_2,
+            text="Cópia leve local 1024px p/ analisar + Identificar Rostos 1º (Original só na escolhida)",
+            variable=self.usar_copia_leve_local,
+            command=lambda: self._atualizar_resumo_hardware(salvar=True),
+        ).pack(side="left")
+
+        ttk.Label(
+            painel_sistema,
+            textvariable=self.resumo_hardware,
+            style="Dica.TLabel",
+        ).pack(anchor="w", pady=(4, 0))
+
+        painel_automacao = ttk.LabelFrame(
+            quadro_config, text="Preferências de Automação & Configurações de Atalhos", padding=8
+        )
+        painel_automacao.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 8))
+
+        self.abrir_tela_7_ao_concluir = tk.BooleanVar(value=True)
+        self.mostrar_avancado = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            painel_automacao,
+            text="Abrir tela das 7 melhores fotos automaticamente ao concluir subpastas",
+            variable=self.abrir_tela_7_ao_concluir,
+        ).pack(anchor="w")
+
+        ttk.Checkbutton(
+            painel_automacao,
+            text="Mostrar painel de planilha e filtros avançados na aba Capas",
+            variable=self.mostrar_avancado,
+            command=self._alternar_modo_avancado,
+        ).pack(anchor="w", pady=(4, 0))
+
+        ttk.Label(
+            painel_automacao,
+            text="Atalhos ativos: [Teclas 1 a 7] Trocar entre as 7 fotos · [Enter] Aprovar e ir p/ próximo pendente · [Duplo-Clique] Editar Curso/Plano na tabela",
+            style="Dica.TLabel",
+            wraplength=580,
+        ).pack(anchor="w", pady=(6, 0))
+
+        # ---------------- Grade Inferior na Aba Configuração: Pastas e Links (Esquerda) + Cores (Direita) ----------------
+        quadro_pastas = ttk.Frame(quadro_config)
+        quadro_pastas.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
         self.aba_pastas = AbaPastas(self, quadro_pastas)
 
-        quadro_cores = ttk.Frame(abas, padding=16)
-        abas.add(quadro_cores, text="Cores dos cursos")
+        quadro_cores = ttk.LabelFrame(quadro_config, text="Cores dos cursos (brasões)", padding=8)
+        quadro_cores.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
         self.aba_cores = AbaCores(self, quadro_cores)
 
         principal.columnconfigure(0, weight=1)
         principal.rowconfigure(1, weight=1)
         principal.rowconfigure(4, weight=1)
 
-        # ---------------- Barra Rápida (1 Clique Sem Planilha) ----------------
+        # ---------------- Barra Rápida (1 Clique Sem Planilha — Limpa e Direta) ----------------
 
         topo_rapido = ttk.Frame(principal)
         topo_rapido.grid(row=0, column=0, sticky="we")
@@ -887,74 +981,17 @@ class JanelaCapas:
         ttk.Button(
             linha_rapida_1, text="Ir para Revisão e Recorte ->",
             command=lambda: self.abas.select(self.quadro_revisao),
-        ).pack(side="left", padx=(4, 0))
+        ).pack(side="left", padx=(4, 6))
 
-        self.mostrar_avancado = tk.BooleanVar(value=False)
+        ttk.Button(
+            linha_rapida_1, text="Configuração",
+            command=lambda: self.abas.select(self.quadro_config),
+        ).pack(side="left", padx=(0, 6))
+
         ttk.Checkbutton(
             linha_rapida_1, text="Usar planilha / Opções avançadas",
             variable=self.mostrar_avancado, command=self._alternar_modo_avancado,
         ).pack(side="right")
-
-        # ---------------- Barra de Cópia Leve Local + Limite de Hardware (Sem Travar o PC) ----------------
-
-        barra_hardware = ttk.Frame(topo_rapido)
-        barra_hardware.pack(fill="x", pady=(6, 0))
-
-        ttk.Checkbutton(
-            barra_hardware,
-            text="Cópia leve local p/ analisar (Original só na escolhida)",
-            variable=self.usar_copia_leve_local,
-            command=lambda: self._atualizar_resumo_hardware(salvar=True),
-        ).pack(side="left", padx=(0, 12))
-
-        ttk.Label(barra_hardware, text="Limite de Hardware (CPU):").pack(side="left", padx=(0, 4))
-        self.escala_hardware = ttk.Scale(
-            barra_hardware,
-            from_=25,
-            to=85,
-            variable=self.limite_cpu_pct,
-            orient="horizontal",
-            length=135,
-            command=lambda _v: self._atualizar_resumo_hardware(salvar=False),
-        )
-        self.escala_hardware.pack(side="left", padx=(0, 6))
-        self.escala_hardware.bind("<ButtonRelease-1>", lambda e: self._atualizar_resumo_hardware(salvar=True))
-
-        self.combo_preset_hardware = ttk.Combobox(
-            barra_hardware,
-            textvariable=self.preset_hardware,
-            state="readonly",
-            width=19,
-            values=(
-                "30% (Leve)",
-                "50% (Metade livre)",
-                "60% (Equilibrado)",
-                "75% (Rápido)",
-                "85% (Turbo controlado)",
-            ),
-        )
-        self.combo_preset_hardware.pack(side="left", padx=(0, 10))
-        self.combo_preset_hardware.bind("<<ComboboxSelected>>", self._escolheu_preset_hardware)
-
-        ttk.Checkbutton(
-            barra_hardware,
-            text="Impulsionar c/ GPU (OpenCL)",
-            variable=self.usar_gpu_opencl,
-            command=lambda: self._atualizar_resumo_hardware(salvar=True),
-        ).pack(side="left", padx=(0, 10))
-
-        self.abrir_tela_7_ao_concluir = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            barra_hardware,
-            text="Abrir tela das 7 melhores ao concluir",
-            variable=self.abrir_tela_7_ao_concluir,
-        ).pack(side="left", padx=(0, 10))
-
-        ttk.Label(
-            barra_hardware,
-            textvariable=self.resumo_hardware,
-            style="Dica.TLabel",
-        ).pack(side="left")
 
         # ---------------- Painel Avançado (Oculto por padrão para não poluir) ----------------
 
@@ -5738,10 +5775,27 @@ class AbaPastas:
         q = self.quadro
         q.columnconfigure(0, weight=1)
 
+        # ---------------- Atalho 1 Clique: Sugerir Onde Salvar ----------------
+        atalho_salvar = ttk.LabelFrame(
+            q, text="Atalho Rápido: Encurtar Configuração de Links / Sugerir Onde Salvar", padding=6
+        )
+        atalho_salvar.grid(row=0, column=0, sticky="we", pady=(0, 8))
+        ttk.Button(
+            atalho_salvar,
+            text="Escolher 1 Pasta Principal e Sugerir Onde Salvar Tudo...",
+            style="Primario.TButton",
+            command=self.escolher_pasta_base_e_sugerir,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            atalho_salvar,
+            text="Sugerir Saídas ao Lado da Pasta de Fotos",
+            command=self.sugerir_onde_salvar_pela_pasta_fotos,
+        ).pack(side="left")
+
         # ---------------- Fotos ----------------
 
-        fotos = ttk.LabelFrame(q, text="Fotos dos alunos", padding=8)
-        fotos.grid(row=0, column=0, sticky="we")
+        fotos = ttk.LabelFrame(q, text="Fotos dos alunos e Links", padding=8)
+        fotos.grid(row=1, column=0, sticky="we")
         fotos.columnconfigure(1, weight=1)
 
         origem = ttk.Frame(fotos)
@@ -5753,65 +5807,105 @@ class AbaPastas:
 
         self.campo_fotos = self._linha_pasta(fotos, 1, "Pasta das fotos", self.fotos_pasta)
 
-        ttk.Label(fotos, text="Link do Drive").grid(row=2, column=0, sticky="w", pady=3)
-        self.campo_link = ttk.Entry(fotos, textvariable=self.fotos_link, width=90)
-        self.campo_link.grid(row=2, column=1, sticky="we", padx=6, pady=3)
-        self.botao_baixar = ttk.Button(fotos, text="Baixar fotos novas", command=self.baixar_fotos)
-        self.botao_baixar.grid(row=2, column=2, pady=3)
-        ttk.Label(
-            fotos, style="Dica.TLabel",
-            text="A pasta do Drive precisa estar compartilhada como \"Qualquer pessoa com o link\".",
-        ).grid(row=3, column=1, sticky="w", padx=6)
+        ttk.Label(fotos, text="Link do Drive").grid(row=2, column=0, sticky="w", pady=2)
+        self.campo_link = ttk.Entry(fotos, textvariable=self.fotos_link, width=52)
+        self.campo_link.grid(row=2, column=1, sticky="we", padx=6, pady=2)
+        self.botao_baixar = ttk.Button(fotos, text="Baixar novas", command=self.baixar_fotos)
+        self.botao_baixar.grid(row=2, column=2, pady=2)
 
         self.campo_drive_dir = self._linha_pasta(
-            fotos, 4, "Guardar as fotos do Drive em", self.fotos_drive_dir,
-            "As fotos são baixadas para esta pasta; o recorte e o Photoshop usam ela. "
-            "Só baixa as que ainda não estão lá.",
+            fotos, 4, "Guardar do Drive em", self.fotos_drive_dir,
         )
         self.check_sincronizar = ttk.Checkbutton(
-            fotos, text="Baixar as fotos novas do Drive antes de Validar / Gerar / Recortar",
+            fotos, text="Baixar fotos novas do Drive antes de Validar / Gerar / Recortar",
             variable=self.sincronizar_antes,
         )
-        self.check_sincronizar.grid(row=6, column=1, sticky="w", padx=6, pady=(4, 0))
+        self.check_sincronizar.grid(row=6, column=1, sticky="w", padx=6, pady=(2, 0))
 
         self._linha_pasta(
             fotos, 7, "Originais (_ORIGINAIS)", self.backup,
-            "Onde o recorte guarda a foto original. Vazio = pasta _ORIGINAIS dentro da pasta das fotos.",
         )
 
         # ---------------- Capas ----------------
 
-        capas = ttk.LabelFrame(q, text="Modelos e capas prontas", padding=8)
-        capas.grid(row=1, column=0, sticky="we", pady=(10, 0))
+        capas = ttk.LabelFrame(q, text="Modelos PSD e Onde Salvar Capas Prontas", padding=8)
+        capas.grid(row=2, column=0, sticky="we", pady=(8, 0))
         capas.columnconfigure(1, weight=1)
         self._linha_pasta(capas, 0, "PSDs das capas", self.psd)
         for i, tam in enumerate(SAIDAS, start=1):
-            dica = ("Frente e verso. Vazio = pasta \"CAPAS 30X22\" ao lado da pasta do 30X20."
-                    if tam == "30X22" else "")
-            self._linha_pasta(capas, i, "Capas prontas " + tam, self.saidas[tam], dica)
+            self._linha_pasta(capas, i, "Salvar " + tam, self.saidas[tam])
 
         # ---------------- Planilhas ----------------
 
-        planilhas = ttk.LabelFrame(q, text="Planilhas", padding=8)
-        planilhas.grid(row=2, column=0, sticky="we", pady=(10, 0))
+        planilhas = ttk.LabelFrame(q, text="Planilhas", padding=6)
+        planilhas.grid(row=3, column=0, sticky="we", pady=(8, 0))
         planilhas.columnconfigure(1, weight=1)
         self._linha_pasta(
             planilhas, 0, "Pasta das planilhas", self.planilha_dir,
-            "Pasta aberta no \"Escolher...\". O link do Google vai direto no campo da aba Capas.",
         )
 
         # ---------------- Ações ----------------
 
         acoes = ttk.Frame(q)
-        acoes.grid(row=3, column=0, sticky="we", pady=(10, 0))
-        ttk.Button(acoes, text="Salvar", style="Primario.TButton", command=self.salvar).pack(side="left")
+        acoes.grid(row=4, column=0, sticky="we", pady=(8, 0))
+        ttk.Button(acoes, text="Salvar Pastas e Links", style="Primario.TButton", command=self.salvar).pack(side="left")
         ttk.Button(acoes, text="Conferir caminhos", command=self.conferir).pack(side="left", padx=6)
-        ttk.Button(acoes, text="Desfazer alterações", command=self.carregar).pack(side="left")
+        ttk.Button(acoes, text="Desfazer", command=self.carregar).pack(side="left")
 
-        self.log = tk.Text(q, height=9, wrap="word", state="disabled",
+        self.log = tk.Text(q, height=5, wrap="word", state="disabled",
                            background=COR_FUNDO, foreground=COR_TEXTO)
-        self.log.grid(row=4, column=0, sticky="nsew", pady=(8, 0))
-        q.rowconfigure(4, weight=1)
+        self.log.grid(row=5, column=0, sticky="nsew", pady=(6, 0))
+        q.rowconfigure(5, weight=1)
+
+    def escolher_pasta_base_e_sugerir(self):
+        from tkinter import filedialog
+        atual = self.fotos_pasta.get().strip() or str(PASTA)
+        pasta_base = filedialog.askdirectory(
+            title="Escolha a pasta principal da turma/contrato para sugerir todas as pastas",
+            initialdir=atual if Path(atual).is_dir() else str(PASTA),
+        )
+        if not pasta_base:
+            return
+        base = Path(pasta_base)
+        pasta_fotos = base / "FOTOS" if (base / "FOTOS").is_dir() else (base / "FOTO" if (base / "FOTO").is_dir() else base)
+        self.fotos_origem.set("pasta")
+        self.fotos_pasta.set(str(pasta_fotos))
+        self.backup.set(str(pasta_fotos / "_ORIGINAIS"))
+        for cand_psd in (base / "PSD", base / "CAPA", base / "PSDS", PASTA / "PSD"):
+            if cand_psd.is_dir():
+                self.psd.set(str(cand_psd))
+                break
+        pasta_saida_raiz = base / "CAPAS PRONTAS"
+        for tam in SAIDAS:
+            self.saidas[tam].set(str(pasta_saida_raiz / f"CAPAS {tam}"))
+        self._atualizar_estado()
+        self._escrever(
+            f"\nSugestão aplicada a partir de: {base}\n"
+            f"  Fotos: {self.fotos_pasta.get()}\n"
+            f"  Saídas sugeridas em: {pasta_saida_raiz}\\CAPAS [TAMANHO]\n"
+            f"Clique em 'Salvar Pastas e Links' para confirmar.\n"
+        )
+
+    def sugerir_onde_salvar_pela_pasta_fotos(self):
+        origem_dir = (
+            self.fotos_drive_dir.get().strip()
+            if self.fotos_origem.get() == "drive"
+            else self.fotos_pasta.get().strip()
+        )
+        if not origem_dir:
+            self._escrever("\nEscolha primeiro a Pasta das fotos para sugerir onde salvar.\n")
+            return
+        p_fotos = Path(origem_dir)
+        pai = p_fotos.parent if p_fotos.parent != p_fotos else p_fotos
+        self.backup.set(str(p_fotos / "_ORIGINAIS"))
+        pasta_saida_raiz = pai / "CAPAS PRONTAS"
+        for tam in SAIDAS:
+            self.saidas[tam].set(str(pasta_saida_raiz / f"CAPAS {tam}"))
+        self._escrever(
+            f"\nOnde salvar sugerido automaticamente ao lado da pasta de fotos:\n"
+            f"  {pasta_saida_raiz}\\CAPAS [20X20, 30X20, 24X34, 30X22]\n"
+            f"Clique em 'Salvar Pastas e Links' para gravar.\n"
+        )
 
     # --------------------------------------------------------
     # Config
