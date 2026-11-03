@@ -3592,9 +3592,20 @@ class AbaFotos:
                     except Exception as e:
                         erro_foto = str(e)
 
+                    foto_20x20 = None
+                    if tamanho_capa == "24X34":
+                        try:
+                            foto_20x20 = automacao.encontrar_foto(nome, "20X20")
+                        except Exception:
+                            foto_20x20 = foto
+
                     chave_foto = chave_caminho_foto(foto) if foto else None
                     if chave_foto:
                         caminhos_vistos.add(chave_foto)
+                    if foto_20x20:
+                        ch_20 = chave_caminho_foto(foto_20x20)
+                        if ch_20:
+                            caminhos_vistos.add(ch_20)
                     curso = (cursos_manuais.get(chave_foto) if chave_foto else None) or str(
                         registro.get("curso") or ""
                     ).strip()
@@ -3604,6 +3615,7 @@ class AbaFotos:
                         "nome": nome,
                         "curso": curso,
                         "foto": foto,
+                        "foto_20x20": foto_20x20,
                         "erro": erro_foto,
                         "tamanho_foto": tamanho_foto,
                         "tamanho_capa": tamanho_capa,
@@ -4067,12 +4079,16 @@ class AbaFotos:
             entrada["nome"] + "  -  capa " + entrada["tamanho_capa"] + "  (" + grupo["curso"] + ")  [Fixo]")
         if entrada.get("foto"):
             arq_aluno = Path(entrada["foto"])
-            self.foto_revisao_atual.set(arq_aluno.name)
+            if entrada.get("tamanho_capa") == "24X34" and entrada.get("foto_20x20"):
+                arq_20 = Path(entrada["foto_20x20"])
+                self.foto_revisao_atual.set(f"24X34: {arq_aluno.name}  |  20X20: {arq_20.name}")
+            else:
+                self.foto_revisao_atual.set(arq_aluno.name)
             if self.lista.exists(arq_aluno.name):
                 self.lista.selection_set(arq_aluno.name)
                 self.lista.see(arq_aluno.name)
-            if self.arquivo != arq_aluno and not self.ocupado:
-                self.abrir(arq_aluno)
+            if (self.arquivo != arq_aluno or self.tam.get() != entrada["tamanho_foto"]) and not self.ocupado:
+                self.abrir(arq_aluno, tam_forcado=entrada["tamanho_foto"])
             else:
                 self._atualizar_opcoes_foto_aluno(
                     nome_explicito=entrada["nome"], tam_explicito=entrada["tamanho_foto"]
@@ -4088,6 +4104,7 @@ class AbaFotos:
 
         def trabalho():
             recortada = preset = previa = erro = None
+            recortada_20x20 = preset_20x20 = previa_20x20 = None
             try:
                 tamanho = entrada["tamanho_capa"]
                 simbolo = grupo.get("simbolo")
@@ -4122,10 +4139,59 @@ class AbaFotos:
                                 self._cache_recorte_revisao.clear()
                             self._cache_recorte_revisao[ch_rec] = recortada
                 else:
-                    recortada = Image.new("RGB", (400, 300), "#808080")
+                    recortada = Image.new("RGB", (400, 600), "#808080")
+
+                # Para pacotes 24X34 (Berlim), também prepara a 2ª prévia (20X20) com a foto especificada para 20X20
+                if tamanho == "24X34":
+                    cor_20 = grupo.get("cor")
+                    if simbolo:
+                        ch_p20 = ("20X20", simbolo, tuple(cor_20) if cor_20 else None)
+                        preset_20x20 = self._presets_curso.get(ch_p20)
+                        if preset_20x20 is None:
+                            try:
+                                preset_20x20 = rf.gerar_presets_curso(
+                                    "20X20", {simbolo: tuple(cor_20) if cor_20 else None}
+                                ).get(simbolo)
+                                if preset_20x20 is not None:
+                                    self._presets_curso[ch_p20] = preset_20x20
+                            except Exception:
+                                preset_20x20 = None
+                    if preset_20x20 is None:
+                        previa_20x20 = self._previas_capa.get("20X20")
+                        if previa_20x20 is None:
+                            previa_20x20 = rf.ler_previa_capa("20X20")
+                            if previa_20x20 is not None:
+                                self._previas_capa["20X20"] = previa_20x20
+
+                    arq_20 = Path(entrada.get("foto_20x20") or entrada.get("foto")) if (entrada.get("foto_20x20") or entrada.get("foto")) else None
+                    if arq_20 and arq_20.is_file():
+                        try:
+                            st_20 = arq_20.stat()
+                            ch_rec_20 = (str(arq_20), st_20.st_mtime_ns, "20X20")
+                        except OSError:
+                            ch_rec_20 = None
+                        recortada_20x20 = self._cache_recorte_revisao.get(ch_rec_20) if ch_rec_20 else None
+                        if recortada_20x20 is None:
+                            recortada_20x20 = self._recorte_revisao(
+                                rf, arq_20, "20X20", cfg, calibracao
+                            )
+                            if ch_rec_20 and recortada_20x20 is not None:
+                                self._cache_recorte_revisao[ch_rec_20] = recortada_20x20
+                    else:
+                        recortada_20x20 = Image.new("RGB", (400, 447), "#808080")
             except Exception as e:
                 erro = e
-            self.root.after(0, self._capa_aluno_pronta, token_atual, entrada, recortada, preset, previa, erro)
+            self.root.after(
+                0,
+                self._capa_aluno_pronta,
+                token_atual,
+                entrada,
+                recortada,
+                preset,
+                previa,
+                erro,
+                (recortada_20x20, preset_20x20, previa_20x20),
+            )
 
         threading.Thread(target=trabalho, daemon=True).start()
 
@@ -4154,6 +4220,8 @@ class AbaFotos:
                     rf.calcular_recorte(tam_orig, rosto, molde, calibracao.get(tamanho_foto, rf.CALIBRACAO_PADRAO))
                     if rosto else rf.ajustar_caixa((0, 0, tam_orig[0], tam_orig[1]), tam_orig, molde)
                 )
+        else:
+            caixa = rf.ajustar_caixa(caixa, tam_orig, molde)
         fx = imagem_red.width / float(max(1, tam_orig[0]))
         fy = imagem_red.height / float(max(1, tam_orig[1]))
         caixa_red = (
@@ -4165,7 +4233,7 @@ class AbaFotos:
         recortada = imagem_red.crop(caixa_red).convert("RGB")
         return recortada
 
-    def _capa_aluno_pronta(self, token, entrada, recortada, preset, previa, erro):
+    def _capa_aluno_pronta(self, token, entrada, recortada, preset, previa, erro, dados_20x20=None):
 
         if token != self._token_selecao_aluno:
             return
@@ -4177,6 +4245,7 @@ class AbaFotos:
         if recortada is None:
             recortada = Image.new("RGB", (400, 300), "#808080")
         self._previa_aluno = (recortada, preset, previa)
+        self._previa_aluno_20x20 = dados_20x20
         self._renderizar_nome_revisao()
 
     def _ajuste_dos_controles(self):
@@ -4234,6 +4303,32 @@ class AbaFotos:
                 cor=(grupo.get("cor") if grupo else entrada.get("cor")),
                 ajuste=ajuste,
             )
+
+        # Se for plano 24X34, monta também a prévia 20X20 com a foto especificada e exibe as duas lado a lado!
+        if tamanho == "24X34" and getattr(self, "_previa_aluno_20x20", None):
+            rec_20, preset_20, previa_20 = self._previa_aluno_20x20
+            if rec_20 is not None:
+                ajuste_20 = rf.ler_ajuste_nome(entrada["nome"], "20X20") or ajuste
+                if preset_20:
+                    capa_20 = rf.montar_previa_preset(rec_20, preset_20, entrada["nome"], ajuste_20, rapido=rapido)
+                elif previa_20:
+                    capa_20 = rf.montar_previa_capa(rec_20, previa_20, entrada["nome"], "20X20", ajuste_20, rapido=rapido)
+                else:
+                    capa_20 = rf.montar_previa_sintetica(
+                        rec_20,
+                        "20X20",
+                        entrada["nome"],
+                        curso=(grupo.get("curso") if grupo else entrada.get("curso")) or "",
+                        cor=(grupo.get("cor") if grupo else entrada.get("cor")),
+                        ajuste=ajuste_20,
+                    )
+                if hasattr(rf, "montar_previa_dupla_berlim"):
+                    nome_f24 = Path(entrada["foto"]).name if entrada.get("foto") else "24X34"
+                    nome_f20 = Path(entrada.get("foto_20x20") or entrada.get("foto")).name if (entrada.get("foto_20x20") or entrada.get("foto")) else "20X20"
+                    capa = rf.montar_previa_dupla_berlim(
+                        capa, capa_20, nome_f24, nome_f20, ativo=self.tam.get()
+                    )
+
         layout = rf.calcular_layout_nome(tamanho, entrada["nome"], ajuste)
 
         self._preenchendo_nome = True
@@ -4794,11 +4889,17 @@ class AbaFotos:
             return
         self.abrir(arquivo)
 
-    def abrir(self, arquivo):
+    def abrir(self, arquivo, tam_forcado=None):
 
         rf = self._modulo()
         calib = self._calibracao()
-        tam = rf.tamanho_do_arquivo(arquivo)
+        tam = tam_forcado or rf.tamanho_do_arquivo(arquivo)
+        if not tam_forcado and self._aluno_nome and self._aluno_nome[1].get("foto"):
+            try:
+                if Path(self._aluno_nome[1]["foto"]).resolve() == Path(arquivo).resolve():
+                    tam = self._aluno_nome[1].get("tamanho_foto") or tam
+            except Exception:
+                pass
         self._ocupar(True, "Abrindo " + arquivo.name + "...")
 
         def trabalho():

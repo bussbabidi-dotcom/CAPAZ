@@ -3845,12 +3845,13 @@ def ler_previa_capa(tam):
 
 
 def montar_previa_capa(recortada, previa, nome=None, tamanho=None, ajuste=None, rapido=False):
-    """Encaixa a foto já recortada no lugar da camada FOTO da capa reduzida."""
+    """Encaixa a foto já recortada no lugar da camada FOTO da capa reduzida sem esticar nem encolher."""
     info, baixo, cima = previa
     l, t, r, b = info["foto"]
     capa = baixo.copy().convert("RGBA")
     filtro_redim = Image.BILINEAR if rapido else Image.LANCZOS
-    foto = recortada.convert("RGB").resize((max(1, round(r - l)), max(1, round(b - t))), filtro_redim)
+    fw, fh = max(1, round(r - l)), max(1, round(b - t))
+    foto = ImageOps.fit(recortada.convert("RGB"), (fw, fh), method=filtro_redim, centering=(0.5, 0.35))
     vl, vt, vr, vb = (round(v) for v in info["foto_visivel"])
     fl, ft = round(l), round(t)
     cl0 = max(vl, fl)
@@ -3869,24 +3870,28 @@ def montar_previa_capa(recortada, previa, nome=None, tamanho=None, ajuste=None, 
 def montar_previa_sintetica(recortada, tamanho, nome=None, curso="", cor=None, ajuste=None):
     """
     Gera uma prévia sintética rápida e elegante da capa quando o PSD base ainda não foi gerado.
-    Garante que a aba Revisão e Recorte sempre mostre a capa do aluno com foto, cor do curso e nome.
+    Garante que a aba Revisão e Recorte sempre mostre a capa do aluno com foto na proporção EXATA do molde (sem esticar).
     """
     tam = str(tamanho or "24X34").upper()
     if tam == "20X20":
         w, h = 920, 620
-        box = (470, 55, 865, 450)
+        # Proporção exata de MOLDES_PADRAO["20X20"] = 2694x3012 (354 x 396)
+        box = (490, 54, 844, 450)
         area_nome = (470, 465, 865, 585)
     elif tam == "30X20":
         w, h = 980, 560
-        box = (520, 42, 930, 395)
-        area_nome = (520, 410, 930, 530)
+        # Proporção exata de MOLDES_PADRAO["30X20"] = 3874x3012 (454 x 353)
+        box = (498, 42, 952, 395)
+        area_nome = (500, 410, 950, 530)
     elif tam == "30X22":
         w, h = 980, 600
-        box = (510, 45, 930, 420)
-        area_nome = (510, 435, 930, 565)
+        # Proporção exata de MOLDES_PADRAO["30X20"] = 3874x3012 (463 x 360)
+        box = (492, 50, 955, 410)
+        area_nome = (495, 430, 950, 565)
     else:
         w, h = 760, 940
-        box = (155, 110, 605, 650)
+        # Proporção exata de MOLDES_PADRAO["24X34"] = 4160x6240 = 2:3 (360 x 540)
+        box = (200, 110, 560, 650)
         area_nome = (90, 685, 670, 880)
 
     rgb_fundo = tuple(int(c) for c in cor) if (isinstance(cor, (list, tuple)) and len(cor) == 3) else (24, 34, 56)
@@ -3901,10 +3906,10 @@ def montar_previa_sintetica(recortada, tamanho, nome=None, curso="", cor=None, a
         draw.line([(meio_x, 0), (meio_x, h)], fill=(212, 175, 95), width=2)
     draw.rectangle([16, 16, w - 17, h - 17], outline=(212, 175, 95), width=2)
 
-    # Foto recortada encaixada
+    # Foto recortada encaixada mantendo proporção uniforme (sem esticar nem encolher)
     l, t, r, b = box
     fw, fh = max(1, r - l), max(1, b - t)
-    foto_redim = recortada.convert("RGB").resize((fw, fh), Image.BILINEAR)
+    foto_redim = ImageOps.fit(recortada.convert("RGB"), (fw, fh), method=Image.BILINEAR, centering=(0.5, 0.35))
     capa.paste(foto_redim, (l, t))
     draw.rectangle([l - 2, t - 2, r + 1, b + 1], outline=(212, 175, 95), width=2)
 
@@ -3927,6 +3932,53 @@ def montar_previa_sintetica(recortada, tamanho, nome=None, curso="", cor=None, a
         if nl2:
             draw.text((cx, ny0 + 70), nl2, fill=(212, 175, 95), font=f2, anchor="mm")
     return capa
+
+
+def montar_previa_dupla_berlim(capa_24x34, capa_20x20, nome_foto_24x34="", nome_foto_20x20="", ativo="24X34"):
+    """
+    Compõe lado a lado as duas prévias obrigatórias dos planos 24X34 (Prancheta 24X34 + Capa 20X20),
+    mantendo a proporção exata de cada uma (sem esticar nem diminuir) e exibindo a foto especificada de cada formato.
+    """
+    if capa_24x34 is None and capa_20x20 is None:
+        return None
+    if capa_24x34 is None:
+        return capa_20x20
+    if capa_20x20 is None:
+        return capa_24x34
+
+    alt_alvo = 640
+    c1 = capa_24x34.convert("RGB").copy()
+    c2 = capa_20x20.convert("RGB").copy()
+    c1.thumbnail((520, alt_alvo - 56), Image.BILINEAR)
+    c2.thumbnail((720, alt_alvo - 56), Image.BILINEAR)
+
+    pad = 16
+    topo_h = 40
+    larg_total = pad + c1.width + pad + c2.width + pad
+    alt_total = topo_h + max(c1.height, c2.height) + pad
+
+    painel = Image.new("RGB", (larg_total, alt_total), (18, 21, 26))
+    draw = ImageDraw.Draw(painel)
+    fonte = _fonte_pil(None, 14)
+
+    x1 = pad
+    y1 = topo_h + (alt_total - topo_h - pad - c1.height) // 2
+    x2 = pad + c1.width + pad
+    y2 = topo_h + (alt_total - topo_h - pad - c2.height) // 2
+
+    painel.paste(c1, (x1, y1))
+    painel.paste(c2, (x2, y2))
+
+    cor_borda_1 = (56, 189, 248) if str(ativo).upper() == "24X34" else (71, 85, 105)
+    cor_borda_2 = (56, 189, 248) if str(ativo).upper() == "20X20" else (71, 85, 105)
+    draw.rectangle([x1 - 2, y1 - 2, x1 + c1.width + 1, y1 + c1.height + 1], outline=cor_borda_1, width=2)
+    draw.rectangle([x2 - 2, y2 - 2, x2 + c2.width + 1, y2 + c2.height + 1], outline=cor_borda_2, width=2)
+
+    txt1 = f"1. PRÉVIA 24X34  •  {nome_foto_24x34 or 'Foto 24x34'}"
+    txt2 = f"2. PRÉVIA 20X20  •  {nome_foto_20x20 or 'Foto 20x20'}"
+    draw.text((x1 + 4, 12), txt1[:52], fill=(253, 224, 71) if str(ativo).upper() == "24X34" else (203, 213, 225), font=fonte)
+    draw.text((x2 + 4, 12), txt2[:58], fill=(253, 224, 71) if str(ativo).upper() == "20X20" else (203, 213, 225), font=fonte)
+    return painel
 
 
 def _camada_por_caminho(psd, caminho):
@@ -4351,8 +4403,12 @@ def montar_previa_preset(recortada, preset, nome=None, ajuste=None, rapido=False
     capa = preset["baixo"].copy().convert("RGBA")
     l, t, r, b = preset["foto"]
     filtro_redim = Image.BILINEAR if rapido else Image.LANCZOS
-    foto = recortada.convert("RGB").resize(
-        (max(1, round(r - l)), max(1, round(b - t))), filtro_redim,
+    fw, fh = max(1, round(r - l)), max(1, round(b - t))
+    foto = ImageOps.fit(
+        recortada.convert("RGB"),
+        (fw, fh),
+        method=filtro_redim,
+        centering=(0.5, 0.35),
     )
     vl, vt, vr, vb = (round(valor) for valor in preset["foto_visivel"])
     fl, ft = round(l), round(t)
