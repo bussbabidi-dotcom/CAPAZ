@@ -3159,6 +3159,12 @@ class AbaFotos:
 
         ttk.Button(
             topo_curso,
+            text="✦ Editar Foto / Realismo IA (Ctrl+E)",
+            command=self.abrir_editor_photoshop,
+        ).pack(side="left", padx=(0, 6))
+
+        ttk.Button(
+            topo_curso,
             text="✓ Aprovar e Ir p/ Próximo Pendente (Enter)",
             style="Primario.TButton",
             command=self.aprovar_e_proximo_pendente,
@@ -3302,6 +3308,12 @@ class AbaFotos:
 
         acoes_foto = ttk.Frame(quadro_recorte)
         acoes_foto.pack(fill="x", pady=(8, 0))
+        self.botao_editar_photoshop = ttk.Button(
+            acoes_foto,
+            text="✦ Editar Foto / Realismo IA (Ctrl+E)",
+            command=self.abrir_editor_photoshop,
+        )
+        self.botao_editar_photoshop.pack(fill="x", pady=(0, 4))
         self.botao_aprovar_pendente = ttk.Button(
             acoes_foto,
             text="✓ Aprovar e Próximo Pendente (Enter)",
@@ -3323,6 +3335,8 @@ class AbaFotos:
         )
         self.botao_restaurar.pack(fill="x", pady=(4, 0))
         self.tela.bind("<Return>", lambda e: self.aprovar_e_proximo_pendente())
+        self.tela.bind("<Control-e>", lambda e: self.abrir_editor_photoshop())
+        self.root.bind("<Control-e>", lambda e: self.abrir_editor_photoshop() if self._revisao_visivel() else None)
 
         quadro_opcoes = ttk.LabelFrame(
             quadro_recorte, text="7 Melhores da Pasta (Troca 1 Clique)", padding=4
@@ -5364,6 +5378,13 @@ class AbaFotos:
         filtro_interp = Image.BILINEAR if arrastando else Image.LANCZOS
         recortada = self.reduzida.crop(caixa_red).resize(
             (max(1, round(mw * escala)), max(1, round(mh * escala))), filtro_interp)
+        if not arrastando and self.arquivo and hasattr(self.rf, "ler_edicao_realismo"):
+            try:
+                ed_realismo = self.rf.ler_edicao_realismo(self.arquivo)
+                if self.rf.tem_edicao_realismo_ativa(ed_realismo):
+                    recortada = self.rf.aplicar_realismo_ia_e_ajustes(recortada, ed_realismo)
+            except Exception:
+                pass
 
         # Se o aluno atual da Revisão corresponde a esta foto, renderiza UMA única vez!
         mesmo_aluno_revisao = False
@@ -5720,6 +5741,389 @@ class AbaFotos:
             b.configure(state=estado)
         if texto:
             self.status.set(texto)
+
+    def abrir_editor_photoshop(self):
+        """Abre a janela separada estilo Photoshop com Filtro de Realismo IA, Poros, Anti-Cera e Camera Raw."""
+        from tkinter import messagebox
+
+        if not self.arquivo or not self.reduzida:
+            messagebox.showinfo(
+                "Estúdio Photoshop & Realismo IA",
+                "Selecione primeiro um formando na lista da aba Revisão e Recorte para editar a foto.",
+            )
+            return
+
+        rf = self._modulo()
+        EstudioPhotoshopRealismoDialog(self, rf, self.arquivo, self.reduzida, self.caixa)
+
+
+class EstudioPhotoshopRealismoDialog:
+    """
+    Janela separada (tk.Toplevel) estilo Photoshop Darkroom com:
+    - Motor de Realismo IA & Pele Natural (Textura de Poros, Desplastificar Pele/Anti-Cera, Suavizar Halos IA, Nitidez Óptica)
+    - Ajustes Camera Raw (Exposição, Contraste, Sombras/Realces, Temperatura, Saturação, Grão de Filme)
+    - Pincéis de Retoque Local (Poros & Pele, Suavizar Halos, Dodge & Burn, Borracha)
+    - Comparador Interativo Antes / Depois com cortina deslizante e zoom até 300%.
+    """
+
+    def __init__(self, aba_fotos, rf, arquivo, img_reduzida, caixa):
+        import tkinter as tk
+        from tkinter import ttk
+
+        self.aba_fotos = aba_fotos
+        self.rf = rf
+        self.arquivo = Path(arquivo)
+        self.tk = tk
+        self.ttk = ttk
+
+        # Recorta a região da foto (ou usa a reduzida inteira) em tamanho ágil p/ prévia 60fps
+        if caixa and aba_fotos.fator_red:
+            f = aba_fotos.fator_red
+            c_red = tuple(max(0, round(c * f)) for c in caixa)
+            try:
+                base_crop = img_reduzida.crop(c_red)
+            except Exception:
+                base_crop = img_reduzida.copy()
+        else:
+            base_crop = img_reduzida.copy()
+
+        base_crop.thumbnail((880, 1120), Image.LANCZOS)
+        self.img_antes = base_crop.convert("RGB")
+        self.img_depois = self.img_antes.copy()
+
+        ed_salva = rf.ler_edicao_realismo(self.arquivo)
+        if not rf.tem_edicao_realismo_ativa(ed_salva):
+            # Já sugere o preset Realismo Natural IA ao abrir pela primeira vez
+            ed_salva = dict(rf.EDICAO_REALISMO_PADRAO)
+            ed_salva.update(rf.PRESETS_REALISMO_IA["realismo_natural_ia"]["valores"])
+            ed_salva["preset_id"] = "realismo_natural_ia"
+            ed_salva["tracos_pincel"] = []
+
+        self.edicao = ed_salva
+        self.tracos = list(self.edicao.get("tracos_pincel") or [])
+        self.traco_atual = None
+
+        self.top = tk.Toplevel(aba_fotos.root)
+        self.top.title(f"Estúdio Fotográfico & Realismo IA — {self.arquivo.name}")
+        self.top.geometry("1380x860")
+        self.top.minsize(1060, 680)
+        self.top.configure(background="#14171c")
+        self.top.transient(aba_fotos.root)
+
+        self.ferramenta = tk.StringVar(value="mao")
+        self.tam_pincel = tk.IntVar(value=46)
+        self.opac_pincel = tk.IntVar(value=65)
+        self.modo_comp = tk.StringVar(value="split")
+        self.split_pct = 50.0
+        self.zoom_pct = 100
+        self.pan_x = 0
+        self.pan_y = 0
+        self._arrastando_split = False
+        self._arrastando_pan = None
+        self._render_job = None
+        self._tk_img = None
+
+        self.vars_sliders = {
+            "textura_poros": tk.IntVar(value=int(self.edicao.get("textura_poros", 58))),
+            "desplastificar_pele": tk.IntVar(value=int(self.edicao.get("desplastificar_pele", 65))),
+            "suavizar_halos": tk.IntVar(value=int(self.edicao.get("suavizar_halos", 52))),
+            "nitidez_optica": tk.IntVar(value=int(self.edicao.get("nitidez_optica", 42))),
+            "exposicao": tk.IntVar(value=int(self.edicao.get("exposicao", 2))),
+            "contraste": tk.IntVar(value=int(self.edicao.get("contraste", 8))),
+            "sombras_realces": tk.IntVar(value=int(self.edicao.get("sombras_realces", 14))),
+            "temperatura_cor": tk.IntVar(value=int(self.edicao.get("temperatura_cor", 6))),
+            "saturacao": tk.IntVar(value=int(self.edicao.get("saturacao", -6))),
+            "grao_filme": tk.IntVar(value=int(self.edicao.get("grao_filme", 24))),
+        }
+
+        self._montar_interface()
+        self._agendar_processamento(10)
+
+    def _montar_interface(self):
+        tk = self.tk
+        ttk = self.ttk
+
+        # Barra de topo
+        topo = ttk.Frame(self.top, padding=(10, 8))
+        topo.pack(fill="x")
+        ttk.Label(
+            topo,
+            text=f"Ps  Estúdio Fotográfico & Filtro de Realismo IA — {self.rf.nome_do_aluno(self.arquivo)} ({self.arquivo.name})",
+            font=("Segoe UI Semibold", 11),
+        ).pack(side="left")
+
+        ttk.Button(
+            topo, text="✓ Aplicar na Foto e Capa", style="Primario.TButton", command=self.aplicar_e_fechar
+        ).pack(side="right", padx=(6, 0))
+        ttk.Button(topo, text="Cancelar (Esc)", command=self.top.destroy).pack(side="right", padx=4)
+        ttk.Button(topo, text="Zerar Tudo", command=self.zerar_tudo).pack(side="right", padx=4)
+
+        for mod_val, rotulo in (("split", "Dividir Antes/Depois"), ("depois", "Só Depois (Realista)"), ("antes", "Original IA")):
+            ttk.Radiobutton(
+                topo, text=rotulo, value=mod_val, variable=self.modo_comp, command=self._desenhar_canvas
+            ).pack(side="right", padx=6)
+
+        # Corpo 3 colunas
+        corpo = ttk.Frame(self.top, padding=8)
+        corpo.pack(fill="both", expand=True)
+        corpo.columnconfigure(1, weight=1)
+        corpo.rowconfigure(0, weight=1)
+
+        # 1. Coluna Esquerda: Ferramentas e Pincel Local
+        esq = ttk.LabelFrame(corpo, text="Ferramentas & Pincel Local", padding=8)
+        esq.grid(row=0, column=0, sticky="ns", padx=(0, 8))
+
+        ferramentas_opcoes = [
+            ("mao", "Mover / Navegar (H)"),
+            ("poros_pele", "Pincel Poros & Pele (P)"),
+            ("suavizar_halos", "Pincel Suavizar Halos IA (S)"),
+            ("dodge_burn", "Pincel Dodge & Burn (D)"),
+            ("borracha", "Borracha de Máscara (E)"),
+        ]
+        for val, txt in ferramentas_opcoes:
+            ttk.Radiobutton(esq, text=txt, value=val, variable=self.ferramenta).pack(anchor="w", pady=2)
+
+        ttk.Separator(esq).pack(fill="x", pady=8)
+        ttk.Label(esq, text="Tamanho do Pincel (px):").pack(anchor="w")
+        ttk.Scale(esq, from_=12, to=130, variable=self.tam_pincel, orient="horizontal").pack(fill="x", pady=(2, 6))
+
+        ttk.Label(esq, text="Intensidade / Opacidade (%):").pack(anchor="w")
+        ttk.Scale(esq, from_=15, to=100, variable=self.opac_pincel, orient="horizontal").pack(fill="x", pady=(2, 6))
+
+        ttk.Button(esq, text="Desfazer Último Traço", command=self.desfazer_traco).pack(fill="x", pady=(4, 2))
+        ttk.Button(esq, text="Limpar Máscara de Pincel", command=self.limpar_tracos).pack(fill="x", pady=2)
+
+        ttk.Separator(esq).pack(fill="x", pady=8)
+        ttk.Label(esq, text="Zoom de Inspeção de Poros:").pack(anchor="w", pady=(0, 4))
+        quadro_z = ttk.Frame(esq)
+        quadro_z.pack(fill="x")
+        for z in (100, 150, 200, 300):
+            ttk.Button(quadro_z, text=f"{z}%", width=5, command=lambda zv=z: self.definir_zoom(zv)).pack(
+                side="left", padx=1, expand=True, fill="x"
+            )
+
+        # 2. Coluna Central: Canvas Interativo Antes / Depois
+        centro = ttk.Frame(corpo)
+        centro.grid(row=0, column=1, sticky="nsew")
+        centro.columnconfigure(0, weight=1)
+        centro.rowconfigure(0, weight=1)
+
+        self.canvas = tk.Canvas(centro, background="#0d0f14", highlightthickness=1, highlightbackground=COR_BORDA)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.canvas.bind("<Configure>", lambda e: self._desenhar_canvas())
+        self.canvas.bind("<ButtonPress-1>", self._mouse_down)
+        self.canvas.bind("<B1-Motion>", self._mouse_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._mouse_up)
+
+        # 3. Coluna Direita: Presets 1-Clique + Sliders Realismo IA & Camera Raw
+        dir_frame = ttk.LabelFrame(corpo, text="Presets & Motor de Realismo IA + Camera Raw", padding=8)
+        dir_frame.grid(row=0, column=2, sticky="ns", padx=(8, 0))
+
+        ttk.Label(dir_frame, text="Presets de Realismo IA (1 Clique):", font=("Segoe UI Semibold", 9)).pack(
+            anchor="w", pady=(0, 4)
+        )
+        for pid, pinfo in self.rf.PRESETS_REALISMO_IA.items():
+            ttk.Button(
+                dir_frame,
+                text=pinfo["nome"],
+                command=lambda k=pid: self.aplicar_preset(k),
+            ).pack(fill="x", pady=1)
+
+        ttk.Separator(dir_frame).pack(fill="x", pady=6)
+
+        definicoes_sliders = [
+            ("textura_poros", "Textura de Pele & Poros (%)", 0, 100),
+            ("desplastificar_pele", "Desplastificar Pele / Anti-Cera (%)", 0, 100),
+            ("suavizar_halos", "Suavizar Halos & Bordas IA (%)", 0, 100),
+            ("nitidez_optica", "Nitidez Óptica 300 DPI (%)", 0, 100),
+            ("exposicao", "Exposição / Brilho", -50, 50),
+            ("contraste", "Contraste Dinâmico", -50, 50),
+            ("sombras_realces", "Recuperar Sombras / Luzes", -50, 50),
+            ("temperatura_cor", "Temperatura Tom de Pele", -50, 50),
+            ("saturacao", "Saturação Natural", -50, 50),
+            ("grao_filme", "Grão de Filme Fotográfico (%)", 0, 100),
+        ]
+
+        for chave_s, rotulo, vmin, vmax in definicoes_sliders:
+            linha = ttk.Frame(dir_frame)
+            linha.pack(fill="x", pady=1)
+            ttk.Label(linha, text=rotulo, width=28).pack(side="left")
+            lbl_val = ttk.Label(linha, textvariable=self.vars_sliders[chave_s], width=4, anchor="e")
+            lbl_val.pack(side="right")
+            escala = ttk.Scale(
+                dir_frame,
+                from_=vmin,
+                to=vmax,
+                orient="horizontal",
+                length=240,
+                command=lambda val, k=chave_s: self._ao_mover_slider(k, val),
+            )
+            escala.set(self.vars_sliders[chave_s].get())
+            escala.pack(fill="x", pady=(0, 2))
+            setattr(self, f"_scale_{chave_s}", escala)
+
+        self.top.bind("<Escape>", lambda e: self.top.destroy())
+
+    def _ao_mover_slider(self, chave_s, valor):
+        self.vars_sliders[chave_s].set(int(round(float(valor))))
+        self._agendar_processamento(45)
+
+    def aplicar_preset(self, preset_id):
+        info = self.rf.PRESETS_REALISMO_IA.get(preset_id)
+        if not info:
+            return
+        for k, v in info["valores"].items():
+            if k in self.vars_sliders:
+                self.vars_sliders[k].set(int(v))
+                esc = getattr(self, f"_scale_{k}", None)
+                if esc is not None:
+                    esc.set(int(v))
+        self.edicao["preset_id"] = preset_id
+        self._agendar_processamento(10)
+
+    def zerar_tudo(self):
+        for k, var in self.vars_sliders.items():
+            var.set(0)
+            esc = getattr(self, f"_scale_{k}", None)
+            if esc is not None:
+                esc.set(0)
+        self.tracos = []
+        self.edicao["preset_id"] = "original"
+        self._agendar_processamento(10)
+
+    def definir_zoom(self, zv):
+        self.zoom_pct = zv
+        if zv == 100:
+            self.pan_x = 0
+            self.pan_y = 0
+        self._desenhar_canvas()
+
+    def desfazer_traco(self):
+        if self.tracos:
+            self.tracos.pop()
+            self._agendar_processamento(10)
+
+    def limpar_tracos(self):
+        self.tracos = []
+        self._agendar_processamento(10)
+
+    def _montar_dict_edicao(self):
+        d = {k: int(var.get()) for k, var in self.vars_sliders.items()}
+        d["preset_id"] = self.edicao.get("preset_id", "custom")
+        d["tracos_pincel"] = list(self.tracos)
+        return d
+
+    def _agendar_processamento(self, atraso=40):
+        if self._render_job:
+            self.top.after_cancel(self._render_job)
+        self._render_job = self.top.after(atraso, self._processar_previa)
+
+    def _processar_previa(self):
+        self._render_job = None
+        ed = self._montar_dict_edicao()
+        try:
+            self.img_depois = self.rf.aplicar_realismo_ia_e_ajustes(self.img_antes, ed)
+        except Exception:
+            self.img_depois = self.img_antes.copy()
+        self._desenhar_canvas()
+
+    def _desenhar_canvas(self):
+        c = self.canvas
+        c.delete("all")
+        cw = max(100, c.winfo_width())
+        ch = max(100, c.winfo_height())
+
+        iw, ih = self.img_antes.size
+        escala_base = min((cw - 30) / max(1, iw), (ch - 30) / max(1, ih))
+        escala = escala_base * (self.zoom_pct / 100.0)
+        dw = max(1, int(round(iw * escala)))
+        dh = max(1, int(round(ih * escala)))
+
+        ox = (cw - dw) // 2 + self.pan_x
+        oy = (ch - dh) // 2 + self.pan_y
+        self._geom = (ox, oy, dw, dh)
+
+        modo = self.modo_comp.get()
+        if modo == "antes":
+            comp = self.img_antes.resize((dw, dh), Image.BILINEAR)
+        elif modo == "depois":
+            comp = self.img_depois.resize((dw, dh), Image.BILINEAR)
+        else:
+            antes_r = self.img_antes.resize((dw, dh), Image.BILINEAR)
+            depois_r = self.img_depois.resize((dw, dh), Image.BILINEAR)
+            comp = depois_r.copy()
+            corte_x = max(1, min(dw - 1, int(round(dw * self.split_pct / 100.0))))
+            comp.paste(antes_r.crop((0, 0, corte_x, dh)), (0, 0))
+
+        self._tk_img = ImageTk.PhotoImage(comp)
+        c.create_image(ox, oy, image=self._tk_img, anchor="nw")
+
+        if modo == "split":
+            sx = ox + int(round(dw * self.split_pct / 100.0))
+            c.create_line(sx, oy, sx, oy + dh, fill="#f59e0b", width=2)
+            c.create_oval(sx - 12, oy + dh // 2 - 12, sx + 12, oy + dh // 2 + 12, fill="#f59e0b", outline="#0f172a")
+            c.create_text(sx, oy + dh // 2, text="↔", fill="#0f172a", font=("Segoe UI Bold", 9))
+            c.create_text(ox + 12, oy + 14, text="ANTES (IA Plastificada)", fill="#e2e8f0", anchor="nw", font=("Consolas", 9, "bold"))
+            c.create_text(ox + dw - 12, oy + 14, text="DEPOIS (Realismo + Poros)", fill="#fbbf24", anchor="ne", font=("Consolas", 9, "bold"))
+
+    def _mouse_down(self, e):
+        ox, oy, dw, dh = getattr(self, "_geom", (0, 0, 100, 100))
+        if self.modo_comp.get() == "split":
+            sx = ox + int(round(dw * self.split_pct / 100.0))
+            if abs(e.x - sx) <= 16:
+                self._arrastando_split = True
+                return
+
+        ferr = self.ferramenta.get()
+        if ferr == "mao":
+            self._arrastando_pan = (e.x, e.y, self.pan_x, self.pan_y)
+            return
+
+        nx = max(0.0, min(1.0, (e.x - ox) / max(1, dw)))
+        ny = max(0.0, min(1.0, (e.y - oy) / max(1, dh)))
+        self.traco_atual = {
+            "ferramenta": ferr,
+            "tamanho_px": int(self.tam_pincel.get()),
+            "opacidade_pct": int(self.opac_pincel.get()),
+            "pontos": [[round(nx, 4), round(ny, 4)]],
+        }
+
+    def _mouse_drag(self, e):
+        ox, oy, dw, dh = getattr(self, "_geom", (0, 0, 100, 100))
+        if self._arrastando_split:
+            self.split_pct = max(2.0, min(98.0, ((e.x - ox) / max(1, dw)) * 100.0))
+            self._desenhar_canvas()
+            return
+
+        if self._arrastando_pan:
+            sx, sy, px0, py0 = self._arrastando_pan
+            self.pan_x = px0 + (e.x - sx)
+            self.pan_y = py0 + (e.y - sy)
+            self._desenhar_canvas()
+            return
+
+        if self.traco_atual is not None:
+            nx = max(0.0, min(1.0, (e.x - ox) / max(1, dw)))
+            ny = max(0.0, min(1.0, (e.y - oy) / max(1, dh)))
+            self.traco_atual["pontos"].append([round(nx, 4), round(ny, 4)])
+
+    def _mouse_up(self, e):
+        self._arrastando_split = False
+        self._arrastando_pan = None
+        if self.traco_atual is not None:
+            self.tracos.append(self.traco_atual)
+            self.traco_atual = None
+            self._agendar_processamento(10)
+
+    def aplicar_e_fechar(self):
+        ed = self._montar_dict_edicao()
+        self.rf.gravar_edicao_realismo(self.arquivo, ed)
+        self.aba_fotos._agendar_previa()
+        self.aba_fotos.status_revisao.set(
+            f"✦ Filtro de Realismo IA aplicado em {self.arquivo.name} "
+            f"(Poros {ed['textura_poros']}% · Anti-Cera {ed['desplastificar_pele']}% · Halos {ed['suavizar_halos']}%)."
+        )
+        self.top.destroy()
 
 
 # ============================================================

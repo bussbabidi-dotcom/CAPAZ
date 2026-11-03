@@ -3068,18 +3068,300 @@ def _gravar_manual(dados):
     os.replace(temp, MANUAL_FILE)
 
 
-def gravar_manual(caminho, tam, caixa, tamanho_fonte):
-    """Guarda a caixa em frações da foto original (independe da resolução)."""
+def gravar_manual(caminho, tam, caixa, tamanho_fonte, edicao_realismo=None):
+    """Guarda a caixa em frações da foto original (independe da resolução) e preserva edicao_realismo."""
     W, H = tamanho_fonte
     dados = ler_manual()
-    dados[caminho.stem] = {
+    anterior = dados.get(caminho.stem) or {}
+    novo = {
         "tamanho": tam,
         "caixa": [round(caixa[0] / W, 6), round(caixa[1] / H, 6),
                   round(caixa[2] / W, 6), round(caixa[3] / H, 6)],
         "origem": [W, H],
         "data": datetime.datetime.now().isoformat(timespec="seconds"),
     }
+    if edicao_realismo is not None:
+        novo["edicao_realismo"] = edicao_realismo
+    elif "edicao_realismo" in anterior:
+        novo["edicao_realismo"] = anterior["edicao_realismo"]
+    dados[caminho.stem] = novo
     _gravar_manual(dados)
+
+
+EDICAO_REALISMO_PADRAO = {
+    "textura_poros": 0,
+    "desplastificar_pele": 0,
+    "suavizar_halos": 0,
+    "nitidez_optica": 0,
+    "exposicao": 0,
+    "contraste": 0,
+    "sombras_realces": 0,
+    "temperatura_cor": 0,
+    "saturacao": 0,
+    "grao_filme": 0,
+    "preset_id": "original",
+    "tracos_pincel": [],
+}
+
+PRESETS_REALISMO_IA = {
+    "realismo_natural_ia": {
+        "nome": "Realismo Natural IA (Recomendado)",
+        "valores": {
+            "textura_poros": 58,
+            "desplastificar_pele": 65,
+            "suavizar_halos": 52,
+            "nitidez_optica": 42,
+            "exposicao": 2,
+            "contraste": 8,
+            "sombras_realces": 14,
+            "temperatura_cor": 6,
+            "saturacao": -6,
+            "grao_filme": 24,
+        },
+    },
+    "pele_organica_poros": {
+        "nome": "Pele Orgânica & Poros Finos",
+        "valores": {
+            "textura_poros": 78,
+            "desplastificar_pele": 82,
+            "suavizar_halos": 60,
+            "nitidez_optica": 35,
+            "exposicao": 0,
+            "contraste": 6,
+            "sombras_realces": 18,
+            "temperatura_cor": 4,
+            "saturacao": -8,
+            "grao_filme": 32,
+        },
+    },
+    "nitidez_optica_estudio": {
+        "nome": "Nitidez Óptica de Estúdio",
+        "valores": {
+            "textura_poros": 44,
+            "desplastificar_pele": 48,
+            "suavizar_halos": 68,
+            "nitidez_optica": 72,
+            "exposicao": 4,
+            "contraste": 14,
+            "sombras_realces": 10,
+            "temperatura_cor": 2,
+            "saturacao": 4,
+            "grao_filme": 18,
+        },
+    },
+    "tom_pele_quente": {
+        "nome": "Correção de Tom de Pele Quente",
+        "valores": {
+            "textura_poros": 50,
+            "desplastificar_pele": 55,
+            "suavizar_halos": 45,
+            "nitidez_optica": 38,
+            "exposicao": 5,
+            "contraste": 10,
+            "sombras_realces": 20,
+            "temperatura_cor": 18,
+            "saturacao": -10,
+            "grao_filme": 22,
+        },
+    },
+}
+
+
+def tem_edicao_realismo_ativa(edicao):
+    if not isinstance(edicao, dict):
+        return False
+    for ch in (
+        "textura_poros", "desplastificar_pele", "suavizar_halos", "nitidez_optica",
+        "exposicao", "contraste", "sombras_realces", "temperatura_cor", "saturacao", "grao_filme",
+    ):
+        if float(edicao.get(ch, 0) or 0) != 0:
+            return True
+    if edicao.get("tracos_pincel"):
+        return True
+    return False
+
+
+def ler_edicao_realismo(caminho):
+    if not caminho:
+        return dict(EDICAO_REALISMO_PADRAO)
+    stem = caminho.stem if hasattr(caminho, "stem") else Path(str(caminho)).stem
+    reg = ler_manual().get(stem) or {}
+    ed = reg.get("edicao_realismo")
+    if isinstance(ed, dict):
+        res = dict(EDICAO_REALISMO_PADRAO)
+        res.update(ed)
+        return res
+    return dict(EDICAO_REALISMO_PADRAO)
+
+
+def gravar_edicao_realismo(caminho, edicao_realismo):
+    stem = caminho.stem if hasattr(caminho, "stem") else Path(str(caminho)).stem
+    dados = ler_manual()
+    reg = dict(dados.get(stem) or {})
+    if tem_edicao_realismo_ativa(edicao_realismo):
+        reg["edicao_realismo"] = dict(edicao_realismo)
+    else:
+        reg.pop("edicao_realismo", None)
+    reg["data"] = datetime.datetime.now().isoformat(timespec="seconds")
+    dados[stem] = reg
+    _gravar_manual(dados)
+
+
+def aplicar_realismo_ia_e_ajustes(img_pil, edicao):
+    """
+    Motor de Realismo IA & Camera Raw (OpenCV + NumPy) para corrigir fotos melhoradas por IA:
+    1. Máscara suave de pele humana em YCrCb (protege fundo, beca, cabelo e olhos).
+    2. Anti-Cera / Desplastificar Pele: reduz reflexos especulares artificiais e cria micro-relevo dérmico.
+    3. Textura de Pele & Poros Finos: injeta poros orgânicos bi-frequência nos meios-tons da epiderme.
+    4. Suavizar Halos IA: amortece bordas serrilhadas/oversharpened em olhos, dentes e óculos via filtro bilateral.
+    5. Nitidez Óptica 300 DPI: micro-contraste de lente sem gerar artefato digital.
+    6. Camera Raw: Exposição, Contraste, Sombras/Realces, Temperatura, Saturação e Grão de Filme.
+    """
+    if not tem_edicao_realismo_ativa(edicao):
+        return img_pil
+
+    rgb = np.asarray(img_pil.convert("RGB"), dtype=np.float32)
+    h, w, _ = rgb.shape
+
+    poros_str = float(edicao.get("textura_poros", 0)) / 100.0
+    anti_cera_str = float(edicao.get("desplastificar_pele", 0)) / 100.0
+    halos_str = float(edicao.get("suavizar_halos", 0)) / 100.0
+    nitidez_str = float(edicao.get("nitidez_optica", 0)) / 100.0
+
+    exposicao = float(edicao.get("exposicao", 0))
+    contraste = float(edicao.get("contraste", 0))
+    sombras = float(edicao.get("sombras_realces", 0)) / 100.0
+    temp_cor = float(edicao.get("temperatura_cor", 0)) * 0.85
+    saturacao = float(edicao.get("saturacao", 0))
+    grao_str = float(edicao.get("grao_filme", 0)) / 100.0
+
+    # Máscaras de pincel local (poros_pele, suavizar_halos, dodge_burn)
+    mask_poros_local = np.zeros((h, w), dtype=np.float32)
+    mask_halos_local = np.zeros((h, w), dtype=np.float32)
+    mask_dodge_local = np.zeros((h, w), dtype=np.float32)
+
+    tracos = edicao.get("tracos_pincel") or []
+    if tracos:
+        for traco in tracos:
+            pts = traco.get("pontos") or []
+            if not pts:
+                continue
+            ferr = traco.get("ferramenta", "poros_pele")
+            raio = max(4, int(round(float(traco.get("tamanho_px", 42)) * max(w, h) / 900.0)))
+            opac = max(0.05, min(1.0, float(traco.get("opacidade_pct", 65)) / 100.0))
+            camada = np.zeros((h, w), dtype=np.float32)
+            pts_px = [(int(round(p[0] * w)), int(round(p[1] * h))) for p in pts if len(p) >= 2]
+            if len(pts_px) == 1:
+                cv2.circle(camada, pts_px[0], raio // 2, opac, -1, lineType=cv2.LINE_AA)
+            else:
+                for p1, p2 in zip(pts_px[:-1], pts_px[1:]):
+                    cv2.line(camada, p1, p2, opac, thickness=raio, lineType=cv2.LINE_AA)
+            k_blur = max(3, (raio // 2) | 1)
+            camada = cv2.GaussianBlur(camada, (k_blur, k_blur), 0)
+            if ferr == "borracha":
+                fator_apagar = np.clip(1.0 - camada, 0.0, 1.0)
+                mask_poros_local *= fator_apagar
+                mask_halos_local *= fator_apagar
+                mask_dodge_local *= fator_apagar
+            elif ferr == "poros_pele":
+                mask_poros_local = np.clip(mask_poros_local + camada * 0.85, 0.0, 1.2)
+            elif ferr == "suavizar_halos":
+                mask_halos_local = np.clip(mask_halos_local + camada * 0.9, 0.0, 1.2)
+            elif ferr == "dodge_burn":
+                mask_dodge_local = np.clip(mask_dodge_local + camada, 0.0, 1.0)
+
+    # Detecção suave de pele humana em YCrCb
+    ycrcb = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2YCrCb).astype(np.float32)
+    y_chan = ycrcb[:, :, 0]
+    cr_chan = ycrcb[:, :, 1]
+    cb_chan = ycrcb[:, :, 2]
+
+    peso_cr = np.clip(1.0 - np.abs(cr_chan - 152.0) / 32.0, 0.0, 1.0)
+    peso_cb = np.clip(1.0 - np.abs(cb_chan - 106.0) / 32.0, 0.0, 1.0)
+    peso_pele = np.clip(peso_cr * peso_cb * 1.35, 0.0, 1.0)
+    peso_pele = cv2.GaussianBlur(peso_pele, (9, 9), 0)
+
+    # 1. Suavizar Halos & Bordas Artificiais de IA
+    if halos_str > 0.01 or np.any(mask_halos_local > 0.01):
+        suave_bilat = cv2.bilateralFilter(rgb.astype(np.uint8), d=7, sigmaColor=42, sigmaSpace=7).astype(np.float32)
+        grad = np.mean(np.abs(rgb - suave_bilat), axis=2)
+        peso_borda = np.clip((grad - 10.0) / 48.0, 0.0, 1.0)
+        forca_halo = np.clip(halos_str + mask_halos_local, 0.0, 1.0) * peso_borda * 0.78
+        rgb = rgb * (1.0 - forca_halo[:, :, None]) + suave_bilat * forca_halo[:, :, None]
+
+    # 2. Nitidez Óptica & Micro-Contraste (Unsharp seletivo sem halo)
+    if nitidez_str > 0.01:
+        blur_opt = cv2.GaussianBlur(rgb, (0, 0), sigmaX=1.35)
+        detalhe = rgb - blur_opt
+        mag = np.mean(np.abs(detalhe), axis=2)
+        amortecedor = np.clip(1.0 - mag / 42.0, 0.0, 1.0)
+        ganho_nit = (nitidez_str * 1.15 * amortecedor)[:, :, None]
+        rgb = rgb + detalhe * ganho_nit
+
+    # 3. Desplastificar Pele / Anti-Cera IA
+    if anti_cera_str > 0.01 or np.any(mask_poros_local > 0.01):
+        forca_cera = np.clip(anti_cera_str * peso_pele + mask_poros_local * 0.5, 0.0, 1.2)
+        excesso_luz = np.clip(y_chan - 168.0, 0.0, 88.0) * forca_cera * 0.50
+        rgb[:, :, 0] -= excesso_luz * 0.90
+        rgb[:, :, 1] -= excesso_luz * 1.02
+        rgb[:, :, 2] -= excesso_luz * 1.14
+
+    # 4. Textura de Pele & Micro-Poros Orgânicos
+    if poros_str > 0.01 or np.any(mask_poros_local > 0.01):
+        forca_poros = np.clip(poros_str * peso_pele + mask_poros_local, 0.0, 1.35)
+        rng = np.random.default_rng(seed=202503)
+        ruido_fino = rng.standard_normal((h, w), dtype=np.float32)
+        ruido_medio = cv2.GaussianBlur(ruido_fino, (3, 3), 0.75)
+        relevo_poro = ruido_fino * 0.45 + ruido_medio * 0.85
+        relevo_poro = np.where(relevo_poro < -0.2, relevo_poro * 1.30, relevo_poro * 0.75)
+        peso_meio_tom = np.clip(np.sin(np.clip((y_chan - 45.0) / 190.0, 0.0, 1.0) * np.pi), 0.2, 1.0)
+        delta_poro = (relevo_poro * forca_poros * peso_meio_tom * 11.5)[:, :, None]
+        rgb[:, :, 0] += delta_poro[:, :, 0] * 1.02
+        rgb[:, :, 1] += delta_poro[:, :, 0] * 0.96
+        rgb[:, :, 2] += delta_poro[:, :, 0] * 0.90
+
+    # 5. Pincel Local Dodge & Burn
+    if np.any(mask_dodge_local > 0.01):
+        ganho_db = np.where(y_chan >= 128.0, 1.0 + mask_dodge_local * 0.15, 1.0 - mask_dodge_local * 0.11)
+        rgb *= ganho_db[:, :, None]
+
+    # 6. Camera Raw: Exposição, Sombras/Realces e Contraste
+    if exposicao != 0:
+        rgb *= float(2.0 ** (exposicao / 42.0))
+
+    if sombras != 0:
+        lum_norm = np.clip(np.mean(rgb, axis=2) / 255.0, 0.0, 1.0)
+        if sombras > 0:
+            lift = (sombras * ((1.0 - lum_norm) ** 1.8) * 46.0)[:, :, None]
+            rgb += lift
+        else:
+            pull = (abs(sombras) * (lum_norm ** 1.8) * 40.0)[:, :, None]
+            rgb -= pull
+
+    if contraste != 0:
+        c_val = contraste * 1.8
+        fator_c = (259.0 * (c_val + 255.0)) / (255.0 * (259.0 - c_val))
+        rgb = fator_c * (rgb - 128.0) + 128.0
+
+    # 7. Camera Raw: Temperatura e Saturação Natural
+    if temp_cor != 0:
+        rgb[:, :, 0] += temp_cor * 1.10
+        rgb[:, :, 1] += temp_cor * 0.22
+        rgb[:, :, 2] -= temp_cor * 1.15
+
+    if saturacao != 0:
+        fator_sat = 1.0 + saturacao / 75.0
+        luma = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])[:, :, None]
+        rgb = luma + (rgb - luma) * fator_sat
+
+    # 8. Grão de Filme Fotográfico Fino
+    if grao_str > 0.01:
+        rng_g = np.random.default_rng(seed=99172)
+        grao = rng_g.standard_normal((h, w, 1), dtype=np.float32) * (grao_str * 7.5)
+        rgb += grao
+
+    rgb_final = np.clip(rgb, 0, 255).astype(np.uint8)
+    return Image.fromarray(rgb_final, "RGB")
 
 
 def apagar_manual(caminho):
@@ -3091,7 +3373,7 @@ def apagar_manual(caminho):
 def caixa_manual(caminho, tam, tamanho_fonte, molde):
     """Caixa manual em pixels da foto original, ou None."""
     reg = ler_manual().get(caminho.stem)
-    if not reg or reg.get("tamanho") != tam:
+    if not reg or reg.get("tamanho") != tam or "caixa" not in reg:
         return None
     W, H = tamanho_fonte
     l, t, r, b = reg["caixa"]
@@ -3237,19 +3519,20 @@ def ampliacao_da_caixa(caixa, molde):
     return molde[0] / max(1, caixa[2] - caixa[0])
 
 
-def recortar_imagem(img, caixa, molde):
+def recortar_imagem(img, caixa, molde, edicao_realismo=None):
     recortada = img.crop(caixa).resize(molde, Image.LANCZOS)
     if recortada.mode != "RGB":
         recortada = recortada.convert("RGB")
+    if edicao_realismo and tem_edicao_realismo_ativa(edicao_realismo):
+        recortada = aplicar_realismo_ia_e_ajustes(recortada, edicao_realismo)
     return recortada
 
 
-def aplicar_recorte(caminho, caixa, tam, cfg, fonte=None):
+def aplicar_recorte(caminho, caixa, tam, cfg, fonte=None, edicao_realismo=None):
     """
-    Grava a foto da pasta FOTO no tamanho exato do molde.
-    `caixa` está em pixels da foto original (fonte_original).
-    O original vai para _ORIGINAIS antes, se ainda não estiver lá.
-    Retorna o caminho gravado.
+    Grava a foto da pasta FOTO no tamanho exato do molde (300 DPI).
+    Se houver `edicao_realismo` (ou salva em recorte_manual.json), aplica o Filtro de Realismo IA
+    e ajustes Camera Raw na resolução final.
     """
     origem = fonte_original(caminho, cfg)
     if fonte is None:
@@ -3260,7 +3543,10 @@ def aplicar_recorte(caminho, caixa, tam, cfg, fonte=None):
         cfg["backup"].mkdir(parents=True, exist_ok=True)
         shutil.copy2(caminho, cfg["backup"] / caminho.name)
 
-    recortada = recortar_imagem(img, caixa, cfg["moldes"][tam])
+    if edicao_realismo is None:
+        edicao_realismo = ler_edicao_realismo(caminho)
+
+    recortada = recortar_imagem(img, caixa, cfg["moldes"][tam], edicao_realismo=edicao_realismo)
     destino = caminho if caminho.suffix.lower() in (".jpg", ".jpeg") else caminho.with_suffix(".jpg")
     salvar_jpg(recortada, destino, icc, DPI_MOLDE)
     if destino != caminho and caminho.exists():
