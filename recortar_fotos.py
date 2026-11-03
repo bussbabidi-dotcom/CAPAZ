@@ -482,16 +482,159 @@ def _cursos_salvos_por_foto():
     return por_caminho, por_nome
 
 
-def alunos_das_fotos(pasta):
+def mapa_tamanhos_da_lista(alunos_explicitos=None):
     """
-    Monta a lista de capas só com as fotos da pasta (sem planilha):
-    foto com 24X34 -> Berlim; com 20X20 (sem 24X34) -> Essencial; sem tamanho -> Prime 30X20.
-    Recupera também o curso já salvo na revisão (cursos_por_foto.json) e verifica o cache
-    persistente (cache_analise_subpastas.json) para evitar reprocessar fotos já analisadas.
+    Lê a lista ativa de formandos (lista em memória, ultima_colagem.txt ou planilha_colada.xlsx / planilha configurada)
+    e retorna `{chave(nome): {"nome": ..., "curso": ..., "plano": ..., "tamanhos": [...]}}`.
+    Garante que o tamanho solicitado na lista sempre prevaleça sobre o nome do arquivo da foto.
+    """
+    mapa = {}
+
+    def _registrar(nome_bruto, curso_bruto, plano_bruto):
+        nm = formatar_nome(nome_bruto or "")
+        if not nm:
+            return
+        pl = extrair_plano_do_texto(plano_bruto or "") or extrair_plano_do_texto(nome_bruto or "") or str(plano_bruto or "").strip()
+        if not pl:
+            return
+        tams = tamanhos_do_plano(pl)
+        cur = str(curso_bruto or "").strip()
+        ch = chave(nm)
+        if ch in mapa:
+            exist = mapa[ch]
+            for t in tams:
+                if t not in exist["tamanhos"]:
+                    exist["tamanhos"].append(t)
+            if cur and not exist.get("curso"):
+                exist["curso"] = cur
+            exist["plano"] = pl
+        else:
+            mapa[ch] = {
+                "nome": nm,
+                "curso": cur,
+                "plano": pl,
+                "tamanhos": list(tams),
+            }
+
+    if alunos_explicitos:
+        for item in alunos_explicitos:
+            if isinstance(item, dict):
+                _registrar(item.get("nome"), item.get("curso"), item.get("plano"))
+        if mapa:
+            return mapa
+
+    pasta_temp_ui = Path(tempfile.gettempdir()) / "capas_ui"
+    ultima_colagem = pasta_temp_ui / "ultima_colagem.txt"
+    if ultima_colagem.is_file():
+        try:
+            linhas = [
+                l.strip()
+                for l in ultima_colagem.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if l.strip()
+            ]
+            for idx, ln in enumerate(linhas):
+                partes = [p.strip() for p in ln.split("\t")]
+                if idx == 0 and any(chave(p) in ("nome", "aluno", "formando", "plano", "curso") for p in partes):
+                    continue
+                if len(partes) >= 3:
+                    _registrar(partes[0], partes[1], partes[2])
+                elif len(partes) == 2:
+                    if eh_apenas_plano(partes[1]):
+                        _registrar(partes[0], "", partes[1])
+                    else:
+                        _registrar(partes[0], partes[1], "")
+                elif len(partes) == 1:
+                    _registrar(partes[0], "", "")
+        except Exception:
+            pass
+
+    if mapa:
+        return mapa
+
+    # Fallback: tenta ler planilha temporária ou planilha configurada
+    candidatos_xlsx = [
+        pasta_temp_ui / "planilha_colada.xlsx",
+        pasta_temp_ui / "planilha_do_link.xlsx",
+    ]
+    try:
+        bruto = ler_config_bruto()
+        pl_cfg = str(bruto.get("planilha") or "").strip()
+        if pl_cfg and not eh_link(pl_cfg):
+            candidatos_xlsx.append(Path(pl_cfg))
+    except Exception:
+        pass
+
+    for arq_x in candidatos_xlsx:
+        if arq_x.is_file():
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(arq_x, read_only=True, data_only=True)
+                ws = wb.active
+                col_nome, col_curso, col_plano = 0, 1, 2
+                for r_idx, row in enumerate(ws.iter_rows(values_only=True)):
+                    vals = [str(v or "").strip() for v in row]
+                    if not any(vals):
+                        continue
+                    if r_idx == 0:
+                        achou_cab = False
+                        for c_i, v_c in enumerate(vals):
+                            kv = chave(v_c)
+                            if kv in ("nome", "nome do aluno", "nome do formando", "aluno", "formando"):
+                                col_nome = c_i
+                                achou_cab = True
+                            elif kv in ("curso", "formacao"):
+                                col_curso = c_i
+                            elif kv in ("plano", "planos", "album", "produto", "pacote", "modelo", "tamanho", "capa"):
+                                col_plano = c_i
+                                achou_cab = True
+                        if achou_cab:
+                            continue
+                    nm_v = vals[col_nome] if col_nome < len(vals) else ""
+                    cur_v = vals[col_curso] if col_curso < len(vals) else ""
+                    pl_v = vals[col_plano] if col_plano < len(vals) else ""
+                    _registrar(nm_v, cur_v, pl_v)
+                wb.close()
+                if mapa:
+                    break
+            except Exception:
+                pass
+
+    return mapa
+
+
+def tamanho_solicitado_arquivo(caminho, mapa_lista=None):
+    """
+    Determina o tamanho da foto priorizando SEMPRE o tamanho solicitado na lista de formandos.
+    Só usa o sufixo do nome do arquivo para desempatar quando o aluno tem um pacote com 2 tamanhos
+    (ex.: Berlim 24X34 + 20X20) ou quando o aluno não consta na lista.
+    """
+    stem = caminho.stem if hasattr(caminho, "stem") else Path(str(caminho)).stem
+    nm = nome_do_aluno(caminho)
+    ch = chave(nm)
+    mapa = mapa_tamanhos_da_lista() if mapa_lista is None else mapa_lista
+    info = mapa.get(ch) if isinstance(mapa, dict) else None
+    if info and info.get("tamanhos"):
+        tams = info["tamanhos"]
+        if len(tams) == 1:
+            t_unico = str(tams[0]).upper()
+            return "30X20" if t_unico == "30X22" else t_unico
+        achado = extrair_tamanho_do_texto(stem)
+        if achado in tams:
+            return "30X20" if achado == "30X22" else achado
+        return "30X20" if str(tams[0]).upper() == "30X22" else str(tams[0]).upper()
+    return tamanho_do_arquivo(caminho)
+
+
+def alunos_das_fotos(pasta, preservar_lista=True):
+    """
+    Monta a lista de capas a partir das fotos da pasta, preservando sempre o plano/tamanho
+    e o curso já definidos na lista de formandos (quando `preservar_lista=True`) para que o nome
+    do arquivo nunca sobrescreva o tamanho solicitado na lista.
     Retorna [{"nome", "curso", "plano"}] em ordem alfabética.
     """
     verificar_cache_analise_subpastas(pasta)
     por_caminho, por_nome = _cursos_salvos_por_foto()
+    mapa_lista = mapa_tamanhos_da_lista() if preservar_lista else {}
     por_aluno = {}
     for f in listar_fotos(pasta):
         nome = nome_do_aluno(f)
@@ -499,15 +642,25 @@ def alunos_das_fotos(pasta):
             continue
         ch = chave(nome)
         reg = por_aluno.setdefault(ch, {"nome": nome, "curso": "", "tamanhos": set()})
-        reg["tamanhos"].add(tamanho_do_arquivo(f))
+        reg["tamanhos"].add(tamanho_solicitado_arquivo(f, mapa_lista))
         if not reg["curso"]:
             norm = os.path.normcase(os.path.abspath(os.path.normpath(str(f))))
-            reg["curso"] = por_caminho.get(norm) or por_nome.get(ch) or ""
+            reg["curso"] = (
+                por_caminho.get(norm)
+                or por_nome.get(ch)
+                or (mapa_lista.get(ch) or {}).get("curso")
+                or ""
+            )
 
     alunos = []
     for reg in sorted(por_aluno.values(), key=lambda r: chave(r["nome"])):
+        ch = chave(reg["nome"])
+        info_lista = mapa_lista.get(ch)
+        curso = reg.get("curso") or (info_lista or {}).get("curso") or ""
+        if info_lista and info_lista.get("plano"):
+            alunos.append({"nome": reg["nome"], "curso": curso, "plano": info_lista["plano"]})
+            continue
         tamanhos = reg["tamanhos"]
-        curso = reg.get("curso") or ""
         if "24X34" in tamanhos:
             alunos.append({"nome": reg["nome"], "curso": curso, "plano": PLANO_POR_TAMANHO["24X34"]})
         elif "20X20" in tamanhos:
@@ -2463,13 +2616,20 @@ def escolher_melhores_fotos_subpastas(
 
     mapa_planos = {}
     mapa_cursos = {}
+    mapa_lista_ativa = mapa_tamanhos_da_lista(alunos_planos)
+    for ch_l, info_l in mapa_lista_ativa.items():
+        if info_l.get("plano"):
+            mapa_planos[ch_l] = info_l["plano"]
+        if info_l.get("curso"):
+            mapa_cursos[ch_l] = info_l["curso"]
     if alunos_planos:
         for item in alunos_planos:
-            ch = chave(item.get("nome", ""))
-            if ch:
-                mapa_planos[ch] = item.get("plano") or plano_padrao
-                if item.get("curso"):
-                    mapa_cursos[ch] = item["curso"]
+            nm_it = item.get("nome", "")
+            for ch in (chave(nm_it), chave(_nome_base_agrupamento(nm_it))):
+                if ch:
+                    mapa_planos[ch] = item.get("plano") or plano_padrao
+                    if item.get("curso"):
+                        mapa_cursos[ch] = item["curso"]
 
     _, cursos_salvos_nome = _cursos_salvos_por_foto()
     opcoes_salvas = ler_opcoes_foto()
@@ -2492,8 +2652,19 @@ def escolher_melhores_fotos_subpastas(
         plano_inferido_pasta = extrair_plano_do_texto(bruto_pasta)
         nome_aluno = formatar_nome(bruto_pasta)
         ch_aluno = chave(nome_aluno)
-        plano_aluno = mapa_planos.get(ch_aluno) or plano_inferido_pasta or plano_padrao
-        curso_aluno = mapa_cursos.get(ch_aluno) or cursos_salvos_nome.get(ch_aluno) or curso_padrao
+        ch_base_sub = chave(_nome_base_agrupamento(bruto_pasta))
+        plano_aluno = (
+            mapa_planos.get(ch_aluno)
+            or mapa_planos.get(ch_base_sub)
+            or plano_inferido_pasta
+            or plano_padrao
+        )
+        curso_aluno = (
+            mapa_cursos.get(ch_aluno)
+            or mapa_cursos.get(ch_base_sub)
+            or cursos_salvos_nome.get(ch_aluno)
+            or curso_padrao
+        )
         tamanhos_necessarios = tamanhos_do_plano(plano_aluno, berlim_modo)
         tarefas.append({
             "idx_sub": idx_sub,
@@ -2850,11 +3021,12 @@ def garantir_opcoes_foto_disponiveis(cfg, calib=None, alunos_atuais=None):
                     except Exception:
                         pass
 
-    # 2) Garante que os alunos atuais ou fotos da pasta FOTO também estejam presentes
+    # 2) Garante que os alunos atuais ou fotos da pasta FOTO também estejam presentes (respeitando o tamanho da lista)
+    mapa_lista_op = mapa_tamanhos_da_lista(alunos_atuais)
     fotos_pasta = listar_fotos(cfg["fotos"]) if cfg.get("fotos") and Path(cfg["fotos"]).is_dir() else []
     for f in fotos_pasta:
         nm = nome_do_aluno(f)
-        tm = tamanho_do_arquivo(f)
+        tm = tamanho_solicitado_arquivo(f, mapa_lista_op)
         ch_op = f"{chave(nm)}|{tm}"
         if ch_op not in opcoes_validas:
             reg = obter_opcoes_aluno_inteligente(nm, tm, cfg, calib=calib, arquivo_atual=f)
@@ -3403,9 +3575,10 @@ def ajustar_caixa(caixa, tamanho_fonte, molde):
 def calibrar(cfg):
     resultado = {}
     amostras = {k: [] for k in cfg["moldes"]}
+    mapa_lista = mapa_tamanhos_da_lista()
 
     for f in listar_fotos(cfg["fotos"]):
-        tam = tamanho_do_arquivo(f)
+        tam = tamanho_solicitado_arquivo(f, mapa_lista)
         molde = cfg["moldes"].get(tam)
         if not molde:
             continue
@@ -3599,9 +3772,10 @@ def processar(cfg, calib, simular, filtro_aluno, filtro_tamanho):
 
     verificar_cache_analise_subpastas(cfg["fotos"])
     manual_map = ler_manual()
+    mapa_lista = mapa_tamanhos_da_lista()
     fotos_lista = []
     for f in listar_fotos(cfg["fotos"]):
-        tam = tamanho_do_arquivo(f)
+        tam = tamanho_solicitado_arquivo(f, mapa_lista)
         if filtro_tamanho and tam != filtro_tamanho:
             continue
         if filtro_aluno and chave(filtro_aluno) not in chave(f.stem):

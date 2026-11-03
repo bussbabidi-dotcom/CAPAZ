@@ -2016,6 +2016,7 @@ def encontrar_foto(
 
     com_tamanho = []
     sem_tamanho = []
+    outro_tamanho = []
 
     for arquivo in fotos:
 
@@ -2025,8 +2026,8 @@ def encontrar_foto(
             sem_tamanho.append(arquivo)
             continue
 
-        # qualquer tamanho diferente do pedido descarta o arquivo
         if tamanhos - aceitos:
+            outro_tamanho.append(arquivo)
             continue
 
         com_tamanho.append(arquivo)
@@ -2059,23 +2060,46 @@ def encontrar_foto(
             flexivel,
             sem_tamanho
         )
-    except FotoNaoEncontrada:
-        if erro_com_tamanho is not None:
-            raise erro_com_tamanho
-        raise FotoNaoEncontrada(
-            "FOTO NÃO ENCONTRADA:\n\n"
-            + nome
-            + " "
-            + suf
+        print(
+            "  AVISO: SEM FOTO " + suf
+            + " — USANDO FOTO SEM TAMANHO NO NOME (VALE A LISTA):",
+            escolhido.name
         )
+        return escolhido
+    except FotoNaoEncontrada:
+        pass
 
-    print(
-        "  AVISO: SEM FOTO " + suf
-        + " — USANDO FOTO SEM TAMANHO NO NOME:",
-        escolhido.name
+    # ----------------------------------------------------------
+    # 3) Fallback pela LISTA: se o arquivo tiver outro sufixo no nome
+    #    (ex.: nome com 30X20 mas a lista pediu 20X20), usa a foto do
+    #    aluno e adapta ao molde do tamanho solicitado na lista!
+    # ----------------------------------------------------------
+
+    if outro_tamanho:
+        try:
+            escolhido = _buscar_foto_em(
+                nome,
+                "",
+                flexivel,
+                outro_tamanho
+            )
+            print(
+                "  AVISO: USANDO TAMANHO DA LISTA (" + suf
+                + ") IGNORANDO SUFIXO DO ARQUIVO:",
+                escolhido.name
+            )
+            return escolhido
+        except FotoNaoEncontrada:
+            pass
+
+    if erro_com_tamanho is not None:
+        raise erro_com_tamanho
+    raise FotoNaoEncontrada(
+        "FOTO NÃO ENCONTRADA:\n\n"
+        + nome
+        + " "
+        + suf
     )
-
-    return escolhido
 
 
 def _buscar_foto_em(
@@ -2716,7 +2740,8 @@ def criar_job_30(
         )
 
     foto = encontrar_foto(
-        nome
+        nome,
+        "30X20"
     )
 
     simbolo, aviso_curso = resolver_curso(
@@ -2823,7 +2848,7 @@ def criar_job_30x22(
 
     fotos = {}
     if lado == "FRENTE":
-        fotos["foto"] = str(encontrar_foto(nome))
+        fotos["foto"] = str(encontrar_foto(nome, "30X20"))
 
     simbolo, aviso_curso = resolver_curso(
         registro.get("curso", "")
@@ -7859,7 +7884,8 @@ def preparar_foto_no_molde(caminho, tamanho_foto):
     pasta = Path(tempfile.gettempdir()) / "capas_fotos_no_molde"
     pasta.mkdir(parents=True, exist_ok=True)
     destino = pasta / (nome_seguro(caminho.stem) + "_" + tamanho_foto + ".jpg")
-    rf.salvar_jpg(rf.recortar_imagem(img, caixa, molde), destino, icc, (300, 300))
+    edicao_realismo = rf.ler_edicao_realismo(caminho) if hasattr(rf, "ler_edicao_realismo") else None
+    rf.salvar_jpg(rf.recortar_imagem(img, caixa, molde, edicao_realismo=edicao_realismo), destino, icc, (300, 300))
     print("  FOTO FORA DO MOLDE: recortada automaticamente (" + modo + "):", caminho.name)
     return destino
 

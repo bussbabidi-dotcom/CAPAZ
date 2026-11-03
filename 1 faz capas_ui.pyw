@@ -1322,9 +1322,7 @@ class JanelaCapas:
     # --------------------------------------------------------
 
     def _carregar_ultima_colagem(self):
-        """Inicia direto verificando o cache persistente (cache_analise_subpastas.json) e lendo as fotos da pasta."""
-        self.origem.set("fotos")
-        self._atualizar_origem()
+        """Inicia restaurando a última lista colada (se existir) para preservar os tamanhos da lista, ou lendo as fotos da pasta."""
         try:
             rf = modulo_recorte()
             if hasattr(rf, "verificar_cache_analise_subpastas"):
@@ -1335,10 +1333,24 @@ class JanelaCapas:
                 if info_cache.get("existe"):
                     self.status.set(
                         f"Cache carregado (cache_analise_subpastas.json: {info_cache.get('fotos_em_cache', 0)} foto(s), "
-                        f"{info_cache.get('subpastas_em_cache', 0)} subpasta(s)). Lendo fotos..."
+                        f"{info_cache.get('subpastas_em_cache', 0)} subpasta(s))."
                     )
         except Exception:
             pass
+        if ULTIMA_COLAGEM.is_file():
+            try:
+                salvo = ULTIMA_COLAGEM.read_text(encoding="utf-8", errors="ignore").strip()
+                if salvo:
+                    self.origem.set("colar")
+                    self._atualizar_origem()
+                    self.texto_colagem.delete("1.0", "end")
+                    self.texto_colagem.insert("1.0", salvo + "\n")
+                    self.carregar()
+                    return
+            except Exception:
+                pass
+        self.origem.set("fotos")
+        self._atualizar_origem()
         self.root.after(250, self.ler_fotos)
 
     def sincronizar_curso_aluno(self, nome_aluno, curso):
@@ -2304,11 +2316,17 @@ class JanelaCapas:
         for a in alunos:
             linhas.append(a["nome"] + "\t" + (a.get("curso") or curso) + "\t" + a["plano"])
 
+        texto_final = "\n".join(linhas) + "\n"
         estado = str(self.texto_colagem.cget("state"))
         self.texto_colagem.configure(state="normal")
         self.texto_colagem.delete("1.0", "end")
-        self.texto_colagem.insert("1.0", "\n".join(linhas) + "\n")
+        self.texto_colagem.insert("1.0", texto_final)
         self.texto_colagem.configure(state=estado)
+        try:
+            PASTA_TEMP.mkdir(parents=True, exist_ok=True)
+            ULTIMA_COLAGEM.write_text(texto_final, encoding="utf-8")
+        except Exception:
+            pass
         self.carregar()
 
     def _listar_cursos_todos(self):
@@ -2397,6 +2415,13 @@ class JanelaCapas:
             self.texto_colagem.delete("1.0", "end")
             self.texto_colagem.insert("1.0", "\n".join(linhas_formatadas) + "\n")
             self.texto_colagem.configure(state=estado)
+
+        if self.alunos and any(a.get("nome") and a.get("plano") for a in self.alunos):
+            try:
+                PASTA_TEMP.mkdir(parents=True, exist_ok=True)
+                ULTIMA_COLAGEM.write_text(self.texto_colagem.get("1.0", "end"), encoding="utf-8")
+            except Exception:
+                pass
 
         self.tabela.delete(*self.tabela.get_children())
 
@@ -2641,6 +2666,16 @@ class JanelaCapas:
             "O original de cada uma vai para a pasta _ORIGINAIS.\n\nContinuar?",
         ):
             return
+
+        if self.origem.get() in ("colar", "fotos"):
+            try:
+                alunos_atuais = self.carregar()
+                if any(a.get("nome") for a in alunos_atuais):
+                    PASTA_TEMP.mkdir(parents=True, exist_ok=True)
+                    ULTIMA_COLAGEM.write_text(self.texto_colagem.get("1.0", "end"), encoding="utf-8")
+                    gravar_planilha_temporaria(alunos_atuais)
+            except Exception:
+                pass
 
         args = []
         if simular:
@@ -2904,6 +2939,8 @@ class AbaFotos:
         self.ocupado = False
         self.cursos_manuais = self._ler_cursos_foto()
         self.cursos_por_foto = {}
+        self.tamanhos_por_foto = {}
+        self.capas_por_foto = {}
         self._revisao_por_curso = {}
         self._revisao_imagens = {}
         self._revisao_pendente = False
@@ -2989,6 +3026,56 @@ class AbaFotos:
             else:
                 self.calib = {t: dict(rf.CALIBRACAO_PADRAO) for t in TAMANHOS}
         return self.calib
+
+    def _tamanho_solicitado_foto(self, arquivo):
+        """
+        Retorna o tamanho de recorte da foto ('20X20', '24X34' ou '30X20') priorizando SEMPRE
+        o tamanho solicitado na lista de formandos sobre o nome do arquivo.
+        """
+        rf = self._modulo() if self.rf is None else self.rf
+        if not arquivo:
+            return "30X20"
+        arq_p = Path(arquivo)
+
+        # 1) Se o aluno atualmente selecionado na revisão usa esta foto, respeita o tamanho da entrada
+        if self._aluno_nome:
+            ent = self._aluno_nome[1]
+            try:
+                if ent.get("foto") and Path(ent["foto"]).resolve() == arq_p.resolve():
+                    return ent.get("tamanho_foto") or "30X20"
+                if ent.get("foto_20x20") and Path(ent["foto_20x20"]).resolve() == arq_p.resolve():
+                    return "20X20"
+            except Exception:
+                pass
+
+        # 2) Mapa direto caminho -> tamanho construído a partir da lista na Revisão
+        ch_foto = chave_caminho_foto(arq_p)
+        if ch_foto in self.tamanhos_por_foto:
+            return self.tamanhos_por_foto[ch_foto]
+
+        # 3) Busca pelo nome do aluno na lista da janela principal (self.janela.alunos)
+        alunos_janela = getattr(self.janela, "alunos", None) or []
+        if hasattr(rf, "mapa_tamanhos_da_lista") and hasattr(rf, "tamanho_solicitado_arquivo"):
+            mapa_l = rf.mapa_tamanhos_da_lista(alunos_janela)
+            return rf.tamanho_solicitado_arquivo(arq_p, mapa_l)
+        return rf.tamanho_do_arquivo(arq_p)
+
+    def _capa_solicitada_foto(self, arquivo):
+        """Retorna o tamanho da capa ('20X20', '24X34', '30X20', '30X22') solicitado na lista para esta foto."""
+        if not arquivo:
+            return self.tam.get() or "30X20"
+        arq_p = Path(arquivo)
+        if self._aluno_nome:
+            ent = self._aluno_nome[1]
+            try:
+                if ent.get("foto") and Path(ent["foto"]).resolve() == arq_p.resolve():
+                    return ent.get("tamanho_capa") or ent.get("tamanho_foto") or "30X20"
+            except Exception:
+                pass
+        ch_foto = chave_caminho_foto(arq_p)
+        if ch_foto in self.capas_por_foto:
+            return self.capas_por_foto[ch_foto]
+        return self._tamanho_solicitado_foto(arq_p)
 
     # --------------------------------------------------------
     # Montagem
@@ -3549,6 +3636,9 @@ class AbaFotos:
         def trabalho():
             grupos = {}
             cursos_da_foto = {}
+            tamanhos_da_foto = {}
+            capas_da_foto = {}
+            presets_por_tamanho = {}
             erros = []
             try:
                 if hasattr(rf, "verificar_cache_analise_subpastas"):
@@ -3576,6 +3666,7 @@ class AbaFotos:
 
                 entradas = []
                 caminhos_vistos = set()
+                nomes_na_lista = set()
                 for registro in registros:
                     nome = formatar_nome(registro.get("nome") or "")
                     if not nome:
@@ -3583,6 +3674,7 @@ class AbaFotos:
                     _, modelo = automacao.encontrar_modelo(registro.get("plano", ""))
                     if not modelo:
                         continue
+                    nomes_na_lista.add(rf.chave(nome))
                     tamanho_capa = modelo.get("tamanho", "30X20")
                     tamanho_foto = "30X20" if tamanho_capa == "30X22" else tamanho_capa
                     foto = None
@@ -3602,10 +3694,15 @@ class AbaFotos:
                     chave_foto = chave_caminho_foto(foto) if foto else None
                     if chave_foto:
                         caminhos_vistos.add(chave_foto)
+                        tamanhos_da_foto[chave_foto] = tamanho_foto
+                        capas_da_foto[chave_foto] = tamanho_capa
                     if foto_20x20:
                         ch_20 = chave_caminho_foto(foto_20x20)
                         if ch_20:
                             caminhos_vistos.add(ch_20)
+                            if ch_20 != chave_foto:
+                                tamanhos_da_foto[ch_20] = "20X20"
+                                capas_da_foto[ch_20] = "20X20"
                     curso = (cursos_manuais.get(chave_foto) if chave_foto else None) or str(
                         registro.get("curso") or ""
                     ).strip()
@@ -3621,22 +3718,33 @@ class AbaFotos:
                         "tamanho_capa": tamanho_capa,
                     })
 
+                mapa_lista_extra = rf.mapa_tamanhos_da_lista(registros) if hasattr(rf, "mapa_tamanhos_da_lista") else {}
                 for foto in fotos:
                     chave_foto = chave_caminho_foto(foto)
+                    nome_f = rf.nome_do_aluno(foto)
+                    if rf.chave(nome_f) in nomes_na_lista:
+                        continue
                     curso = cursos_manuais.get(chave_foto)
                     if not curso or chave_foto in caminhos_vistos:
                         continue
-                    tamanho_capa = rf.tamanho_do_arquivo(foto)
+                    tamanho_capa = (
+                        rf.tamanho_solicitado_arquivo(foto, mapa_lista_extra)
+                        if hasattr(rf, "tamanho_solicitado_arquivo")
+                        else rf.tamanho_do_arquivo(foto)
+                    )
                     modelo_extra = automacao.encontrar_modelo(plano_extras)[1] if plano_extras else None
                     if modelo_extra:
                         tamanho_capa = modelo_extra.get("tamanho", tamanho_capa)
+                    tam_foto_extra = "30X20" if tamanho_capa == "30X22" else tamanho_capa
                     cursos_da_foto[chave_foto] = curso
+                    tamanhos_da_foto[chave_foto] = tam_foto_extra
+                    capas_da_foto[chave_foto] = tamanho_capa
                     entradas.append({
-                        "nome": rf.nome_do_aluno(foto),
+                        "nome": nome_f,
                         "curso": curso,
                         "foto": foto,
                         "erro": None,
-                        "tamanho_foto": "30X20" if tamanho_capa == "30X22" else tamanho_capa,
+                        "tamanho_foto": tam_foto_extra,
                         "tamanho_capa": tamanho_capa,
                     })
 
@@ -3685,14 +3793,23 @@ class AbaFotos:
                     except Exception:
                         entrada["layout"] = None
 
+                # Coleta TODOS os tamanhos solicitados na lista em todos os alunos de cada curso
                 simbolos_por_tamanho = {}
+                tamanhos_usados = set()
                 for grupo in grupos.values():
                     amostra = next((entrada for entrada in grupo["entradas"] if entrada["foto"]), None)
                     grupo["amostra"] = amostra
-                    if amostra and grupo["simbolo"]:
-                        simbolos_por_tamanho.setdefault(amostra["tamanho_capa"], set()).add(grupo["simbolo"])
+                    for ent_g in grupo["entradas"]:
+                        t_c = ent_g.get("tamanho_capa")
+                        if t_c:
+                            tamanhos_usados.add(t_c)
+                            if grupo["simbolo"]:
+                                simbolos_por_tamanho.setdefault(t_c, set()).add(grupo["simbolo"])
+                            if t_c == "24X34":
+                                tamanhos_usados.add("20X20")
+                                if grupo["simbolo"]:
+                                    simbolos_por_tamanho.setdefault("20X20", set()).add(grupo["simbolo"])
 
-                tamanhos_usados = {g["amostra"]["tamanho_capa"] for g in grupos.values() if g["amostra"]}
                 for tamanho in sorted(tamanhos_usados):
                     if rf.ler_previa_capa(tamanho) is None:
                         self.root.after(0, self.status_revisao.set,
@@ -3702,13 +3819,10 @@ class AbaFotos:
                         except Exception as e:
                             erros.append("Base " + tamanho + ": " + str(e))
 
-                presets_por_tamanho = {}
                 for tamanho, simbolos in simbolos_por_tamanho.items():
                     cursos_rgb = {}
                     for grupo in grupos.values():
-                        amostra = grupo["amostra"]
-                        if (amostra and amostra["tamanho_capa"] == tamanho
-                                and grupo["simbolo"] in simbolos):
+                        if grupo["simbolo"] in simbolos:
                             rgb = None if tamanho == "24X34" else grupo["cor"]
                             cursos_rgb[grupo["simbolo"]] = rgb
                     try:
@@ -3760,13 +3874,30 @@ class AbaFotos:
                     except Exception as e:
                         grupo["avisos"].append("Prévia indisponível: " + str(e))
 
-                self.root.after(0, self._revisao_pronta, grupos, erros, cursos_da_foto)
+                self.root.after(
+                    0,
+                    self._revisao_pronta,
+                    grupos,
+                    erros,
+                    cursos_da_foto,
+                    tamanhos_da_foto,
+                    capas_da_foto,
+                    presets_por_tamanho,
+                )
             except Exception as e:
-                self.root.after(0, self._revisao_pronta, {}, [str(e)], {})
+                self.root.after(0, self._revisao_pronta, {}, [str(e)], {}, {}, {}, {})
 
         threading.Thread(target=trabalho, daemon=True).start()
 
-    def _revisao_pronta(self, grupos, erros, cursos_da_foto=None):
+    def _revisao_pronta(
+        self,
+        grupos,
+        erros,
+        cursos_da_foto=None,
+        tamanhos_da_foto=None,
+        capas_da_foto=None,
+        presets_por_tamanho=None,
+    ):
 
         self._revisao_carregando = False
         if self._revisao_pendente:
@@ -3774,6 +3905,24 @@ class AbaFotos:
             self.agendar_revisao(100)
         self._revisao_por_curso = grupos
         self.cursos_por_foto = cursos_da_foto or {}
+        self.tamanhos_por_foto = tamanhos_da_foto or {}
+        self.capas_por_foto = capas_da_foto or {}
+        if presets_por_tamanho:
+            for tam_p, mapa_simb in presets_por_tamanho.items():
+                if not isinstance(mapa_simb, dict):
+                    continue
+                for simb_p, preset_obj in mapa_simb.items():
+                    if preset_obj is None:
+                        continue
+                    cor_p = None
+                    if tam_p != "24X34":
+                        for g_info in grupos.values():
+                            if g_info.get("simbolo") == simb_p and g_info.get("cor"):
+                                cor_p = tuple(g_info["cor"])
+                                break
+                    self._presets_curso[(tam_p, simb_p, cor_p)] = preset_obj
+        if self.fotos:
+            self._preencher_lista()
         if self.arquivo:
             self._agendar_previa()
         self.lista_revisao.delete(*self.lista_revisao.get_children())
@@ -3885,8 +4034,12 @@ class AbaFotos:
             if self.lista.exists(arq_amostra.name):
                 self.lista.selection_set(arq_amostra.name)
                 self.lista.see(arq_amostra.name)
-            if self.arquivo != arq_amostra and not self.ocupado:
-                self.abrir(arq_amostra)
+            if (self.arquivo != arq_amostra or self.tam.get() != amostra.get("tamanho_foto")) and not self.ocupado:
+                self.abrir(
+                    arq_amostra,
+                    tam_forcado=amostra.get("tamanho_foto"),
+                    capa_forcada=amostra.get("tamanho_capa"),
+                )
         if not tem_aluno_travado:
             if grupo["simbolo"] and grupo["curso"] in self.cursos_disponiveis:
                 self.curso_para_foto.set(grupo["curso"])
@@ -4077,6 +4230,9 @@ class AbaFotos:
             self.curso_para_foto.set(entrada["curso"])
         self.nome_revisao_titulo.set(
             entrada["nome"] + "  -  capa " + entrada["tamanho_capa"] + "  (" + grupo["curso"] + ")  [Fixo]")
+        self.tam.set(entrada["tamanho_foto"])
+        self.capa_previa.set(entrada["tamanho_capa"])
+        self._mostrar_molde()
         if entrada.get("foto"):
             arq_aluno = Path(entrada["foto"])
             if entrada.get("tamanho_capa") == "24X34" and entrada.get("foto_20x20"):
@@ -4088,7 +4244,11 @@ class AbaFotos:
                 self.lista.selection_set(arq_aluno.name)
                 self.lista.see(arq_aluno.name)
             if (self.arquivo != arq_aluno or self.tam.get() != entrada["tamanho_foto"]) and not self.ocupado:
-                self.abrir(arq_aluno, tam_forcado=entrada["tamanho_foto"])
+                self.abrir(
+                    arq_aluno,
+                    tam_forcado=entrada["tamanho_foto"],
+                    capa_forcada=entrada["tamanho_capa"],
+                )
             else:
                 self._atualizar_opcoes_foto_aluno(
                     nome_explicito=entrada["nome"], tam_explicito=entrada["tamanho_foto"]
@@ -4111,7 +4271,11 @@ class AbaFotos:
                 if simbolo:
                     cor = None if tamanho == "24X34" else grupo.get("cor")
                     chave_preset = (tamanho, simbolo, tuple(cor) if cor else None)
-                    preset = self._presets_curso.get(chave_preset) or grupo.get("preset")
+                    amostra_grupo = grupo.get("amostra") or {}
+                    preset_grupo_compativel = (
+                        grupo.get("preset") if amostra_grupo.get("tamanho_capa") == tamanho else None
+                    )
+                    preset = self._presets_curso.get(chave_preset) or preset_grupo_compativel
                     if preset is None:
                         preset = rf.gerar_presets_curso(
                             tamanho, {simbolo: tuple(cor) if cor else None}).get(simbolo)
@@ -4492,8 +4656,12 @@ class AbaFotos:
         if self.lista.exists(arquivo.name):
             self.lista.selection_set(arquivo.name)
             self.lista.see(arquivo.name)
-        if self.arquivo != arquivo:
-            self.abrir(arquivo)
+        if self.arquivo != arquivo or self.tam.get() != amostra.get("tamanho_foto"):
+            self.abrir(
+                arquivo,
+                tam_forcado=amostra.get("tamanho_foto"),
+                capa_forcada=amostra.get("tamanho_capa"),
+            )
         self.tela.focus_set()
 
     def selecionar_aluno_por_nome(self, nome_aluno):
@@ -4729,7 +4897,7 @@ class AbaFotos:
                 manual = rf.ler_manual()
                 situacoes = {}
                 for f in fotos:
-                    tam = rf.tamanho_do_arquivo(f)
+                    tam = self._tamanho_solicitado_foto(f)
                     try:
                         no_molde = rf.no_molde(rf.tamanho_rapido(f), self.cfg["moldes"][tam])
                     except Exception:
@@ -4775,7 +4943,7 @@ class AbaFotos:
         contagem = {}
         mostradas = 0
         for f in self.fotos:
-            tam = rf.tamanho_do_arquivo(f)
+            tam = self._tamanho_solicitado_foto(f)
             sit = self.situacoes.get(f.name, "")
             contagem[sit] = contagem.get(sit, 0) + 1
             if nome and nome not in rf.chave(f.stem):
@@ -4889,17 +5057,12 @@ class AbaFotos:
             return
         self.abrir(arquivo)
 
-    def abrir(self, arquivo, tam_forcado=None):
+    def abrir(self, arquivo, tam_forcado=None, capa_forcada=None):
 
         rf = self._modulo()
         calib = self._calibracao()
-        tam = tam_forcado or rf.tamanho_do_arquivo(arquivo)
-        if not tam_forcado and self._aluno_nome and self._aluno_nome[1].get("foto"):
-            try:
-                if Path(self._aluno_nome[1]["foto"]).resolve() == Path(arquivo).resolve():
-                    tam = self._aluno_nome[1].get("tamanho_foto") or tam
-            except Exception:
-                pass
+        tam = tam_forcado or self._tamanho_solicitado_foto(arquivo)
+        capa_alvo = capa_forcada or self._capa_solicitada_foto(arquivo)
         self._ocupar(True, "Abrindo " + arquivo.name + "...")
 
         def trabalho():
@@ -4917,13 +5080,13 @@ class AbaFotos:
                     if fator < 1.0:
                         reduzida = reduzida.resize((round(tam_orig[0] * fator), round(tam_orig[1] * fator)), Image.BILINEAR)
                 rosto = rf.detectar_rosto_cache(origem) if hasattr(rf, "detectar_rosto_cache") else rf.detectar_rosto(reduzida)
-                self.root.after(0, self._foto_aberta, arquivo, origem, fonte, tam_orig, reduzida, fator, rosto, tam, calib, None)
+                self.root.after(0, self._foto_aberta, arquivo, origem, fonte, tam_orig, reduzida, fator, rosto, tam, capa_alvo, calib, None)
             except Exception as e:
-                self.root.after(0, self._foto_aberta, arquivo, None, None, None, None, 1.0, None, tam, calib, e)
+                self.root.after(0, self._foto_aberta, arquivo, None, None, None, None, 1.0, None, tam, capa_alvo, calib, e)
 
         threading.Thread(target=trabalho, daemon=True).start()
 
-    def _foto_aberta(self, arquivo, origem, fonte, tam_orig, reduzida, fator, rosto, tam, calib, erro):
+    def _foto_aberta(self, arquivo, origem, fonte, tam_orig, reduzida, fator, rosto, tam, capa_alvo, calib, erro):
 
         self._ocupar(False)
         if erro:
@@ -4941,6 +5104,8 @@ class AbaFotos:
         self._img_tela_chave = None
         self._atualizar_foto_revisao_atual()
         self.tam.set(tam)
+        if capa_alvo:
+            self.capa_previa.set(capa_alvo)
         self._mostrar_molde()
 
         W_orig, H_orig = tam_orig
@@ -5541,10 +5706,6 @@ class AbaFotos:
         if amp > self.cfg["ampliacao_maxima"]:
             alertas.append("Resolução baixa: a foto vai ser ampliada " + format(amp, ".0%")
                            + " (limite " + format(self.cfg["ampliacao_maxima"], ".0%") + ").")
-        tam_nome = rf.tamanho_do_arquivo(self.arquivo)
-        if tam_nome != self.tam.get():
-            alertas.append("Atenção: o nome do arquivo indica " + tam_nome
-                           + ". O Photoshop usa esta foto na capa " + tam_nome + ".")
         if self.modo_previa.get() == "capa":
             capa = self._capa_atual()
             curso, simbolo, rgb = self._dados_curso(capa)
