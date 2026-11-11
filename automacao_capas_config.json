@@ -6,8 +6,14 @@
     "20X20": "D:\\ÁLBUNS COLAÇÃO 2025.2\\CAPAS\\CAPAS 20X20",
     "30X20": "D:\\ÁLBUNS COLAÇÃO 2025.2\\CAPAS\\CAPS 30X20",
     "24X34": "D:\\ÁLBUNS COLAÇÃO 2025.2\\CAPAS\\CAPS 24X34",
-    "30X22": "D:\\ÁLBUNS COLAÇÃO 2026.1\\0970 - SANTARÉM\\PÓS-VENDA\\30X22\\CAPAS"
+    "30X22": "D:\\ÁLBUNS COLAÇÃO PÓS-VENDA 2026.1\\1232 - ESMAC\\30x22\\CAPAS"
   },
+  "estojo_dir": "D:\\ÁLBUNS COLAÇÃO 2025.2\\#TEMPLATES\\LAYOUT ZANGRAF\\moldes\\ESTOJOS",
+  "output_dirs_estojo": {
+    "24X34": "D:\\ÁLBUNS COLAÇÃO 2025.2\\ESTOJOS\\ESTOJOS 24X34",
+    "30X20": "D:\\ÁLBUNS COLAÇÃO 2025.2\\ESTOJOS\\ESTOJOS 30X20"
+  },
+  "gerar_estojo": true,
   "dry_run": false,
   "export_jpg": true,
   "export_psd": true,

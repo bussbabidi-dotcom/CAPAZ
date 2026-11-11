@@ -1,0 +1,90 @@
+{
+  "john santana de abreu|30X20": {
+    "nome": "John Santana De Abreu",
+    "tamanho": "30X20",
+    "subpasta": "",
+    "arquivo_destino": "C:\\Users\\REIS\\Documents\\PAPA 2\\capas\\cap\\John Santana De Abreu.JPG",
+    "escolhida": "C:\\Users\\REIS\\Documents\\PAPA 2\\capas\\cap\\John Santana De Abreu.JPG",
+    "aviso_revisao": "",
+    "candidatas": [
+      {
+        "caminho": "C:\\Users\\REIS\\Documents\\PAPA 2\\capas\\cap\\John Santana De Abreu.JPG",
+        "nome_arquivo": "John Santana De Abreu.JPG",
+        "tamanho": "30X20",
+        "valida": true,
+        "aprovada_individual": true,
+        "nota": 86.0,
+        "qtd_pessoas": 1,
+        "orientacao": "Vertical",
+        "orientacao_ideal": true,
+        "encaixe_pct": 89,
+        "nitidez": 77.1,
+        "nitidez_score": 51,
+        "embacada": false,
+        "contraste_score": 99.7,
+        "brilho_medio": 112.0,
+        "brilho_score": 84,
+        "baixo_contraste": false,
+        "estouro_luz": false,
+        "altas_luzes_pct": 0.0,
+        "densidade_rosto_px": 568,
+        "densidade_rosto_pct": 102,
+        "rosto_area_px": 250134,
+        "aprovada_qualidade": true,
+        "aviso_qualidade": "",
+        "ampliacao": 1.29,
+        "caixa": [
+          0,
+          1387,
+          3008,
+          3726
+        ],
+        "resumo": "1 Rosto (Individual) · Vertical (Ideal) · Encaixe 89% · Rosto 568px"
+      }
+    ]
+  },
+  "thyffany daiana barbosa da silva santos|30X20": {
+    "nome": "Thyffany Daiana Barbosa Da Silva Santos",
+    "tamanho": "30X20",
+    "subpasta": "",
+    "arquivo_destino": "C:\\Users\\REIS\\Documents\\PAPA 2\\capas\\cap\\John Santana De Abreu.JPG",
+    "escolhida": "C:\\Users\\REIS\\Documents\\PAPA 2\\capas\\cap\\John Santana De Abreu.JPG",
+    "aviso_revisao": "",
+    "candidatas": [
+      {
+        "caminho": "C:\\Users\\REIS\\Documents\\PAPA 2\\capas\\cap\\John Santana De Abreu.JPG",
+        "nome_arquivo": "John Santana De Abreu.JPG",
+        "tamanho": "30X20",
+        "valida": true,
+        "aprovada_individual": true,
+        "nota": 96.8,
+        "qtd_pessoas": 1,
+        "orientacao": "Vertical",
+        "orientacao_ideal": true,
+        "encaixe_pct": 99,
+        "nitidez": 74.6,
+        "nitidez_score": 50,
+        "embacada": false,
+        "contraste_score": 99.6,
+        "brilho_medio": 112.0,
+        "brilho_score": 84,
+        "baixo_contraste": false,
+        "estouro_luz": false,
+        "altas_luzes_pct": 0.0,
+        "densidade_rosto_px": 567,
+        "densidade_rosto_pct": 102,
+        "rosto_area_px": 251641,
+        "aprovada_qualidade": true,
+        "aviso_qualidade": "",
+        "ampliacao": 0.98,
+        "caixa": [
+          0,
+          1186,
+          3955,
+          4261
+        ],
+        "resumo": "1 Rosto (Individual) · Vertical (Ideal) · Encaixe 99% · Rosto 567px"
+      }
+    ]
+  }
+}

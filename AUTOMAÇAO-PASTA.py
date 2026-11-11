@@ -62,6 +62,41 @@ OUTPUT_DIRS = {
 
 
 # ============================================================
+# ESTOJOS
+#
+# O estojo é a capa pronta (JPG) trocada dentro do smart object
+# do molde. O VERSO do 30X20 é igual para todo mundo.
+# ============================================================
+
+ESTOJO_DIR = Path(
+    r"D:\ÁLBUNS COLAÇÃO 2025.2\#TEMPLATES\LAYOUT ZANGRAF\moldes\ESTOJOS"
+)
+
+OUTPUT_DIRS_ESTOJO = {
+    "24X34": Path(r"D:\ÁLBUNS COLAÇÃO 2025.2\ESTOJOS\ESTOJOS 24X34"),
+    "30X20": Path(r"D:\ÁLBUNS COLAÇÃO 2025.2\ESTOJOS\ESTOJOS 30X20"),
+}
+
+GERAR_ESTOJO = True
+
+MODELOS_ESTOJO = {
+    "24X34": {
+        "psd": "ESTOJO COUCHE LAYFLAT 24X34.jpg.psd",
+        "camada": ["FOTO"],
+    },
+    "30X20": {
+        "psd": "ESTOJO 30X20- 2883 FRENTE.psd",
+        # O smart object da frente tem o código da última pessoa como nome:
+        # sem caminho, o JSX usa o único smart object do documento.
+        "camada": [],
+        "verso": "ESTOJO 30X20- 2883 VERSO.psd",
+    },
+}
+
+VERSO_PADRAO_30X20 = "_VERSO_PADRAO.jpg"
+
+
+# ============================================================
 # CONTROLE
 # ============================================================
 
@@ -92,6 +127,7 @@ def carregar_config(caminho=None):
     global SKIP_EXISTING, FOTO_MATCH_FLEXIVEL
     global BERLIM_GERAR_24, BERLIM_GERAR_20, PLANILHA_ESCOLHIDA
     global CURSOS_POR_FOTO
+    global ESTOJO_DIR, GERAR_ESTOJO
 
     arquivo = Path(caminho) if caminho else CONFIG_FILE
 
@@ -141,6 +177,16 @@ def carregar_config(caminho=None):
 
     if dados.get("planilha"):
         PLANILHA_ESCOLHIDA = Path(dados["planilha"])
+
+    if dados.get("estojo_dir"):
+        ESTOJO_DIR = Path(dados["estojo_dir"])
+
+    for chave_dir, valor in (dados.get("output_dirs_estojo") or {}).items():
+        if valor:
+            OUTPUT_DIRS_ESTOJO[chave_dir] = Path(valor)
+
+    if "gerar_estojo" in dados:
+        GERAR_ESTOJO = bool(dados["gerar_estojo"])
 
     CORES_PERSONALIZADAS.clear()
     for simbolo, valor in (dados.get("cores_cursos") or {}).items():
@@ -3181,6 +3227,175 @@ function buscarTextos(
 // FOTO
 // ==========================================================
 
+// ==========================================================
+// TROCAR O CONTEÚDO DE UM SMART OBJECT
+//
+// Troca o arquivo de dentro e encaixa nos limites que a camada
+// tinha antes (cobre a área, centralizado). Usado pela foto
+// do 20x20 e pelos estojos (capa pronta no molde do estojo).
+// ==========================================================
+
+function substituirConteudo(
+    documento,
+    camada,
+    caminhoArquivo
+) {
+
+    app.activeDocument =
+        documento;
+
+    if (
+        camada.kind !==
+        LayerKind.SMARTOBJECT
+    ) {
+
+        erro(
+            "A CAMADA NÃO É SMART OBJECT:\n\n"
+            + camada.name
+        );
+    }
+
+    var arquivo =
+        new File(
+            caminhoArquivo
+        );
+
+    if (
+        !arquivo.exists
+    ) {
+
+        erro(
+            "ARQUIVO NÃO EXISTE:\n\n"
+            + caminhoArquivo
+        );
+    }
+
+    var alvoLeft =
+        camada.bounds[0].as("px");
+
+    var alvoTop =
+        camada.bounds[1].as("px");
+
+    var alvoWidth =
+        camada.bounds[2].as("px") - alvoLeft;
+
+    var alvoHeight =
+        camada.bounds[3].as("px") - alvoTop;
+
+    documento.activeLayer =
+        camada;
+
+    etapa(
+        "TROCAR CONTEÚDO DO SMART OBJECT (placedLayerReplaceContents): "
+        + caminhoArquivo
+    );
+
+    var desc =
+        new ActionDescriptor();
+
+    desc.putPath(
+        charIDToTypeID("null"),
+        arquivo
+    );
+
+    executeAction(
+        stringIDToTypeID(
+            "placedLayerReplaceContents"
+        ),
+        desc,
+        DialogModes.NO
+    );
+
+    ajustarFotoAoAlvo(
+        documento.activeLayer,
+        alvoLeft,
+        alvoTop,
+        alvoWidth,
+        alvoHeight,
+        caminhoArquivo
+    );
+
+    documento.activeLayer.visible =
+        true;
+}
+
+
+function primeiroSmartObject(
+    container
+) {
+
+    for (
+        var i = 0;
+        i < container.layers.length;
+        i++
+    ) {
+
+        var camada =
+            container.layers[i];
+
+        if (
+            camada.typename === "ArtLayer"
+            && camada.kind === LayerKind.SMARTOBJECT
+        ) {
+
+            return camada;
+        }
+
+        if (
+            camada.typename === "LayerSet"
+        ) {
+
+            var dentro =
+                primeiroSmartObject(camada);
+
+            if (dentro) {
+
+                return dentro;
+            }
+        }
+    }
+
+    return null;
+}
+
+
+// ==========================================================
+// ESTOJO
+//
+// A capa pronta entra no smart object do molde do estojo.
+// ==========================================================
+
+function processarEstojo(
+    documento,
+    job
+) {
+
+    var caminho =
+        (job.config && job.config.camada) || [];
+
+    var camada =
+        caminho.length
+            ? encontrarCaminho(documento, caminho)
+            : primeiroSmartObject(documento);
+
+    if (
+        !camada
+    ) {
+
+        erro(
+            "O MOLDE DO ESTOJO NÃO TEM SMART OBJECT PARA A CAPA:\n\n"
+            + job.template
+        );
+    }
+
+    substituirConteudo(
+        documento,
+        camada,
+        job.fotos.capa
+    );
+}
+
+
 function substituirFoto(
     documento,
     caminhoFoto,
@@ -3207,6 +3422,19 @@ function substituirFoto(
             "A CAMADA FOTO NÃO É SMART OBJECT:\n\n"
             + camada.name
         );
+    }
+
+    if (
+        !redimensionarFoto
+    ) {
+
+        substituirConteudo(
+            documento,
+            camada,
+            caminhoFoto
+        );
+
+        return;
     }
 
     var arquivo =
@@ -6734,6 +6962,26 @@ function executar() {
         }
 
 
+        else if (
+            job.modelo ===
+            "ESTOJO 30X20 VERSO"
+        ) {
+
+            // Verso fixo: só exporta o molde.
+        }
+
+
+        else if (
+            job.modelo.indexOf("ESTOJO ") === 0
+        ) {
+
+            processarEstojo(
+                documento,
+                job
+            );
+        }
+
+
         else {
 
             erro(
@@ -7900,6 +8148,7 @@ def preparar_fotos_do_job(job):
 def rodar_job(job, rotulo):
     """Executa um job respeitando o que já existe. Retorna a mensagem."""
 
+    capa_jpg = job.get("saida_jpg") or ""
     aplicar_curso_manual_foto(job)
     modo = ajustar_saidas_existentes(job)
     if modo != "SKIP":
@@ -7907,7 +8156,8 @@ def rodar_job(job, rotulo):
 
     if modo == "SKIP":
         print(">>> PULANDO", rotulo, "(JPG e PSD ja existem)" if job.get("exportar_psd") else "(JPG ja existe)")
-        return None
+        estojo = estojo_depois_da_capa(job, capa_jpg)
+        return (rotulo + " JA EXISTIA + " + estojo) if estojo else None
 
     if modo == "SO_PSD":
         print(">>> JPG JA EXISTE — GERANDO SO O PSD")
@@ -7918,10 +8168,168 @@ def rodar_job(job, rotulo):
         executar_photoshop(job)
 
     if modo == "SO_PSD":
-        return rotulo + " PSD GERADO"
-    if modo == "SO_JPG":
-        return rotulo + " JPG GERADO"
-    return rotulo + " GERADO"
+        mensagem = rotulo + " PSD GERADO"
+    elif modo == "SO_JPG":
+        mensagem = rotulo + " JPG GERADO"
+    else:
+        mensagem = rotulo + " GERADO"
+
+    estojo = estojo_depois_da_capa(job, capa_jpg, capa_refeita=modo in ("TUDO", "SO_JPG"))
+    return mensagem + (" + " + estojo if estojo else "")
+
+
+# ============================================================
+# ESTOJOS
+# ============================================================
+
+def nome_saida_estojo(nome, tamanho, lado=""):
+    base = nome_seguro(nome).replace(" ", "-") + "_" + tamanho
+    return base + (("_" + lado) if lado else "") + ".jpg"
+
+
+def saidas_estojo(nome, tamanho):
+    """Arquivos finais do estojo: 24X34 um JPG; 30X20 frente _01 e verso _02."""
+
+    pasta = OUTPUT_DIRS_ESTOJO[tamanho]
+    if tamanho == "30X20":
+        return [pasta / nome_saida_estojo(nome, tamanho, "01"), pasta / nome_saida_estojo(nome, tamanho, "02")]
+    return [pasta / nome_saida_estojo(nome, tamanho)]
+
+
+def criar_job_estojo(nome, tamanho, capa_jpg):
+
+    modelo = MODELOS_ESTOJO.get(tamanho)
+    if not modelo:
+        raise Exception("TAMANHO SEM ESTOJO: " + str(tamanho))
+
+    psd = ESTOJO_DIR / modelo["psd"]
+    if not psd.exists():
+        raise Exception("MOLDE DO ESTOJO NÃO ENCONTRADO:\n\n" + str(psd))
+
+    return {
+        "nome": nome,
+        "modelo": "ESTOJO " + tamanho,
+        "template": str(psd),
+        "config": {"tamanho": tamanho, "camada": modelo.get("camada") or []},
+        "fotos": {"capa": str(capa_jpg)},
+        "saida_jpg": str(saidas_estojo(nome, tamanho)[0]),
+        "saida_psd": "",
+        "exportar_psd": False,
+    }
+
+
+def garantir_verso_30x20():
+    """JPG do verso fixo do estojo 30X20, refeito só quando o molde muda."""
+
+    molde = ESTOJO_DIR / MODELOS_ESTOJO["30X20"]["verso"]
+    if not molde.exists():
+        raise Exception("MOLDE DO VERSO DO ESTOJO NÃO ENCONTRADO:\n\n" + str(molde))
+
+    verso = OUTPUT_DIRS_ESTOJO["30X20"] / VERSO_PADRAO_30X20
+    if _arquivo_pronto(verso) and verso.stat().st_mtime >= molde.stat().st_mtime:
+        return verso
+
+    print(">>> GERANDO O VERSO PADRÃO DO ESTOJO 30X20")
+    executar_photoshop({
+        "nome": "VERSO PADRAO",
+        "modelo": "ESTOJO 30X20 VERSO",
+        "template": str(molde),
+        "config": {"tamanho": "30X20"},
+        "fotos": {},
+        "saida_jpg": str(verso),
+        "saida_psd": "",
+        "exportar_psd": False,
+    })
+    return verso
+
+
+def gerar_estojo(nome, tamanho, capa_jpg, forcar=False):
+    """Faz o estojo a partir da capa pronta. Retorna 'GERADO', 'JA EXISTE' ou 'DRY-RUN'."""
+
+    saidas = saidas_estojo(nome, tamanho)
+
+    if SKIP_EXISTING and not forcar and all(_arquivo_pronto(s) for s in saidas):
+        print(">>> ESTOJO", tamanho, "JA EXISTE:", saidas[0].name)
+        return "JA EXISTE"
+
+    if not Path(capa_jpg).is_file():
+        raise Exception("CAPA DO ESTOJO NÃO ENCONTRADA:\n\n" + str(capa_jpg))
+
+    job = criar_job_estojo(nome, tamanho, capa_jpg)
+
+    print()
+    print(">>> ESTOJO", tamanho)
+    print("MOLDE:", job["template"])
+    print("CAPA:", capa_jpg)
+    print("JPG:", ", ".join(str(s) for s in saidas))
+
+    if DRY_RUN:
+        return "DRY-RUN"
+
+    executar_photoshop(job)
+
+    if tamanho == "30X20":
+        copiar_com_retry(garantir_verso_30x20(), saidas[1], "VERSO DO ESTOJO 30X20")
+
+    return "GERADO"
+
+
+def estojo_depois_da_capa(job, capa_jpg, capa_refeita=False):
+    """Depois de uma capa 30X20 ou 24X34, faz o estojo. Erro no estojo não derruba a capa."""
+
+    tamanho = (job.get("config") or {}).get("tamanho")
+    if not GERAR_ESTOJO or tamanho not in MODELOS_ESTOJO or not capa_jpg:
+        return ""
+    if DRY_RUN and not Path(capa_jpg).is_file():
+        print(">>> ESTOJO", tamanho, "seria feito depois da capa (dry-run)")
+        return ""
+    try:
+        resultado = gerar_estojo(job["nome"], tamanho, capa_jpg, forcar=capa_refeita)
+    except Exception as e:
+        print("  ERRO NO ESTOJO", tamanho + ":", str(e).replace("\n", " ")[:300])
+        return "ESTOJO " + tamanho + " COM ERRO"
+    if resultado == "GERADO":
+        return "ESTOJO " + tamanho + " GERADO"
+    return ""
+
+
+def gerar_estojos_de_csv(arquivo):
+    """Estojos a partir de capas que já existem: CSV com NOME;TAMANHO;CAPA."""
+
+    arquivo = Path(arquivo)
+    with arquivo.open(encoding="utf-8-sig", newline="") as f:
+        linhas = list(csv.DictReader(f, delimiter=";"))
+
+    print()
+    print("=" * 75)
+    print("ESTOJOS A PARTIR DE CAPAS PRONTAS:", len(linhas))
+    print("=" * 75)
+
+    contagem = {"GERADO": 0, "JA EXISTE": 0, "DRY-RUN": 0, "ERRO": 0}
+    for i, linha in enumerate(linhas, start=1):
+        nome = formatar_nome(linha.get("NOME") or "")
+        tamanho = (linha.get("TAMANHO") or "").strip().upper()
+        capa = (linha.get("CAPA") or "").strip()
+        print()
+        print("-" * 75)
+        print("ESTOJO", i, "/", len(linhas), "|", nome, "|", tamanho)
+        try:
+            resultado = gerar_estojo(nome, tamanho, capa, forcar=not SKIP_EXISTING)
+            contagem[resultado] = contagem.get(resultado, 0) + 1
+            print("STATUS:", resultado)
+        except Exception as e:
+            contagem["ERRO"] += 1
+            print("ERRO:", str(e))
+
+    print()
+    print("=" * 75)
+    print(
+        "RESUMO ESTOJOS — GERADOS: " + str(contagem["GERADO"])
+        + " | JA EXISTIAM: " + str(contagem["JA EXISTE"])
+        + " | ERROS: " + str(contagem["ERRO"])
+    )
+    print("=" * 75)
+    return contagem["ERRO"] == 0
 
 
 def processar_registro(registro):
@@ -8153,6 +8561,16 @@ def parse_args(argv=None):
         help="Nao exporta PSD",
     )
     parser.add_argument(
+        "--estojos-de",
+        default=None,
+        help="CSV NOME;TAMANHO;CAPA: só faz os estojos a partir de capas que já existem",
+    )
+    parser.add_argument(
+        "--sem-estojo",
+        action="store_true",
+        help="Não faz o estojo depois da capa",
+    )
+    parser.add_argument(
         "--parar-arquivo",
         default=None,
         help="Se este arquivo aparecer, para antes da proxima capa (botao Parar da UI)",
@@ -8170,8 +8588,12 @@ def aplicar_args(args):
 
     global DRY_RUN, EXPORT_JPG, EXPORT_PSD, SKIP_EXISTING
     global BERLIM_GERAR_24, BERLIM_GERAR_20, PLANILHA_ESCOLHIDA
+    global GERAR_ESTOJO
 
     carregar_config(args.config)
+
+    if args.sem_estojo:
+        GERAR_ESTOJO = False
 
     if args.planilha:
         PLANILHA_ESCOLHIDA = Path(args.planilha)
@@ -8368,6 +8790,14 @@ def main(argv=None):
     print("BERLIM_GERAR_20:", BERLIM_GERAR_20)
     print("PHOTOS_DIR:", PHOTOS_DIR)
     print("PSD_DIR:", PSD_DIR)
+    print("GERAR_ESTOJO:", GERAR_ESTOJO)
+    print("ESTOJO_DIR:", ESTOJO_DIR)
+
+    if args.estojos_de:
+        ok = gerar_estojos_de_csv(args.estojos_de)
+        if not ok:
+            sys.exit(1)
+        return
 
     registros = ler_planilha(
         args.planilha or PLANILHA_ESCOLHIDA
