@@ -1,0 +1,19 @@
+{
+  "NIKOLE LARISSA MIRANDA SILVA 24x34": {
+    "edicao_realismo": {
+      "textura_poros": 0,
+      "desplastificar_pele": 65,
+      "suavizar_halos": 52,
+      "nitidez_optica": 42,
+      "exposicao": 2,
+      "contraste": 8,
+      "sombras_realces": 14,
+      "temperatura_cor": 6,
+      "saturacao": -6,
+      "grao_filme": 0,
+      "preset_id": "realismo_natural_ia",
+      "tracos_pincel": []
+    },
+    "data": "2026-11-11T15:12:18"
+  }
+}
